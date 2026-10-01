@@ -324,3 +324,22 @@ arm 간 증가분**으로 본다.
 가까운 참고치. 단, 모델 버전이 다르고(Claude-3.7 vs 지금 쓰는 Sonnet), n=80(논문은 n=187)이라
 직접 비교는 참고용일 뿐 — `ReasoningBank → EFM`의 개선폭이 이 수준(±6~10 SR) 안팎인지 보는 용도로만
 쓸 것.
+
+## 2026-10-01 — Mind2Web으로 EFM 3-arm 포팅 (Docker 불필요, 공유용)
+
+사용자가 다른 협업자(고려대)와 공유하려는데 WebArena는 Docker 호스팅이 필요해서 현실적으로 어려움 —
+Mind2Web은 오프라인 리플레이라 Docker 없이 `download_data.py`만으로 재현 가능해서 전환 결정.
+
+**중요 발견**: 루트 `CLAUDE.md`가 "Mind2Web은 Actor-only, ReasoningBank 메모리 미연동"이라고 적어뒀는데
+이미 stale함 — `Mind2Web/memory.py`에 reasoningbank 단일 arm 메모리 루프(검색/judge/추출)가 이미
+구현·연동(`--memory-mode reasoningbank`)되어 있었음. 그래서 EFM을 처음부터 새로 만든 게 아니라,
+이미 동작하는 `none`/`reasoningbank` 인프라 위에 `efm` arm 하나를 추가하는 작업이었음.
+
+**구현**: `Mind2Web/efm/`(WebArena/efm/ 포팅 — 알고리즘 자체는 도메인 무관이라 거의 그대로, 임베딩만
+`memory.py`의 `embed_query()`를 감싸는 `store.embed_text()`로 교체), `Mind2Web/utils/{agy_client.py,
+claude_cli_client.py}` 추가 + `clients.py`에 등록(`agy-claude-sonnet-4-6`, `ccli-sonnet`), `run.py`의
+`process_task()`/`main()`에 `efm_ctx` 분기 추가(`--memory-mode efm`). 단위테스트 28/28 포팅·통과.
+
+**검증 상태**: 3-태스크 생티티 체크 시도했으나 두 번째 Claude 계정의 세션 한도(19시 리셋)가 아직
+안 풀려서 judge/추출 호출이 막힘(코드 버그 아님, graceful하게 에러 로깅하고 안 죽음 — 확인됨). 쿼터
+리셋 후 재검증 필요.
