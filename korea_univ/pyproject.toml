@@ -1,0 +1,31 @@
+[project]
+name = "reasoning-bank"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Critical: Must match MemEvol_cleaned for correct reward calculation
+    "browsergym-core==0.14.1",
+    "browsergym-experiments==0.14.1",
+    "browsergym-webarena==0.14.1",
+    "browsergym==0.14.1",
+    # Playwright: allow newer version for Python 3.13 compatibility
+    "playwright>=1.44.0",
+    # Allow newer compatible versions for other packages
+    "anthropic>=0.64.0",
+    "google-cloud-aiplatform>=1.108.0",
+    "google-genai>=1.80.0",
+    "langchain>=0.3.26",
+    "langchain-anthropic>=0.3.19",
+    "langchain-community>=0.3.26",
+    "langchain-openai>=1.1.11",
+    "openai>=2.26.0",
+    "pillow>=11.2.1",
+    "torch>=2.7.0",
+    # Mind2Web pipeline: reading the HF parquet dataset and parsing cleaned_html
+    "pandas>=2.2.0",
+    "pyarrow>=17.0.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.2.0",
+]
