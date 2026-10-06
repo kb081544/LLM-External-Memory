@@ -31,7 +31,10 @@ import torch.nn.functional as F
 from google import genai
 from google.genai.types import EmbedContentConfig
 
-from memory_instruction import SUCCESSFUL_SI, FAILED_SI, MEM_INSTRUCTION
+from memory_instruction import (
+    SUCCESSFUL_SI, FAILED_SI, MEM_INSTRUCTION, AWM_INSTRUCTION, AWM_EXAMPLE,
+    ACE_REFLECTOR_SI, ACE_REFLECTOR_FI,
+)
 from utils.clients import CLIENT_DICT
 
 EMBED_MODEL = "gemini-embedding-001"
@@ -200,6 +203,51 @@ def induce_memory(model_name: str, confirmed_task: str, steps: list[dict], judge
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
         text = re.sub(r"\n?```$", "", text)
     return [block.strip() for block in text.split("\n\n") if block.strip()]
+
+
+def induce_memory_for_mode(mode: str, model_name: str, confirmed_task: str, steps: list[dict],
+                            judged_success: bool) -> list[str]:
+    """Generalizes induce_memory() to the synapse/awm baselines too, mirroring WebArena's
+    induce_memory.py --memory_mode branches exactly (same gating: synapse/awm only produce
+    something on success; reasoningbank runs on both). `judged_success` -- not ground truth --
+    gates these the same way it already gates SUCCESSFUL_SI/FAILED_SI above, for the reason in
+    this module's docstring."""
+    if mode == "reasoningbank":
+        return induce_memory(model_name, confirmed_task, steps, judged_success)
+
+    if mode == "synapse":
+        # No distillation call -- the raw trajectory IS the "memory".
+        if not judged_success:
+            return []
+        return [format_trajectory_for_induction(confirmed_task, steps)]
+
+    if mode == "awm":
+        if not judged_success:
+            return []
+        trajectory = format_trajectory_for_induction(confirmed_task, steps)
+        llm = CLIENT_DICT[model_name](model_name=model_name)
+        text, _ = llm.one_step_chat(trajectory, system_msg=AWM_INSTRUCTION + AWM_EXAMPLE, temperature=0.7)
+        text = (text or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+            text = re.sub(r"\n?```$", "", text)
+        return [block.strip() for block in text.split("\n\n") if block.strip()]
+
+    if mode == "ace":
+        # Reflector step only -- stateless, mirrors WebArena/induce_memory.py's ace branch
+        # exactly. Curation (merge into the playbook) happens in run.py via ace/curate.py,
+        # same separation of concerns as WebArena's pipeline_memory.py.
+        trajectory = format_trajectory_for_induction(confirmed_task, steps)
+        system_msg = ACE_REFLECTOR_SI if judged_success else ACE_REFLECTOR_FI
+        llm = CLIENT_DICT[model_name](model_name=model_name)
+        text, _ = llm.one_step_chat(trajectory, system_msg=system_msg, temperature=0.7)
+        text = (text or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+            text = re.sub(r"\n?```$", "", text)
+        return [block.strip() for block in text.split("\n\n") if block.strip()]
+
+    raise ValueError(f"induce_memory_for_mode: unknown mode {mode!r}")
 
 
 def append_memory_bank(memory_bank_path: Path, task_id: str, confirmed_task: str, judged_success: bool, memory_items: list[str]) -> None:

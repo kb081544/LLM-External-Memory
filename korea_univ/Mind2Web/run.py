@@ -52,6 +52,8 @@ from efm.insert import insert as efm_insert_fn
 from efm.forget import forget as efm_forget_fn
 from efm.usage import record_usage as efm_record_usage
 from efm.parse import parse_memory_items as efm_parse_memory_items, format_item_for_prompt as efm_format_item
+from ace.playbook import load_playbook as ace_load_playbook, save_playbook as ace_save_playbook, format_playbook_for_prompt
+from ace.curate import parse_candidate_bullets as ace_parse_candidate_bullets, curate as ace_curate
 
 SCHEMA_VERSION = 1
 
@@ -303,6 +305,7 @@ def process_task(
     multimodal_index: MultimodalIndex | None = None,
     scaling_k: int = 1,
     efm_ctx: dict | None = None,
+    ace_ctx: dict | None = None,
 ) -> dict:
     annotation_id = row["annotation_id"]
     website = row["website"]
@@ -351,6 +354,15 @@ def process_task(
             memory_error = f"efm retrieval error: {type(exc).__name__}: {exc}"
             print(f"  [efm] {memory_error}", flush=True)
 
+    ace_playbook_size = 0
+    if ace_ctx is not None:
+        # ACE injects the whole (size-capped) evolving playbook every task -- no per-query
+        # retrieval, matching the paper's design (same as WebArena's --ace_dir branch).
+        block = format_playbook_for_prompt(ace_ctx["playbook"], max_bullets=ace_ctx["max_bullets"])
+        if block:
+            system_prompt = SYSTEM_PROMPT + "\n\n" + block
+        ace_playbook_size = len(ace_ctx["playbook"])
+
     # MaTTS parallel scaling (paper Section 3.3): k independent trajectories under the
     # same retrieved memory, at temperature 0.7 (matching the paper) so they actually
     # diverge, then an LLM Best-of-N judge picks the one to score and induce memory
@@ -392,6 +404,7 @@ def process_task(
         "memory_retrieved": [item["task_id"] for item in retrieved_memory],
         "memory_error": memory_error,
         "efm_retrieved": [iid for iid, _item in efm_injected],
+        "ace_playbook_size": ace_playbook_size,
         "scaling": scaling_info,
         "steps": steps_out,
     }
@@ -402,7 +415,9 @@ def process_task(
             # an LLM-as-a-Judge self-assessment, not by Mind2Web's ground truth -- ground
             # truth (task_success) stays untouched above for the reported accuracy metrics
             judged_success, judge_raw = memory_lib.judge_success(memory_ctx["model_name"], confirmed_task, steps_out)
-            induced = memory_lib.induce_memory(memory_ctx["model_name"], confirmed_task, steps_out, judged_success)
+            induced = memory_lib.induce_memory_for_mode(
+                memory_ctx["mode"], memory_ctx["model_name"], confirmed_task, steps_out, judged_success,
+            )
             memory_lib.append_memory_bank(memory_ctx["memory_bank_path"], annotation_id, confirmed_task, judged_success, induced)
             result["judged_success"] = judged_success
             result["judge_raw"] = judge_raw
@@ -445,6 +460,29 @@ def process_task(
         except Exception as exc:  # noqa: BLE001 - an induction hiccup shouldn't kill the run
             result["memory_error"] = f"efm induction error: {type(exc).__name__}: {exc}"
             print(f"  [efm] {result['memory_error']}", flush=True)
+
+    elif ace_ctx is not None and scorable_steps:
+        try:
+            # Same judge as reasoningbank/efm -- ACE only changes how induced bullets are
+            # stored/retrieved (Reflector + Curator), not how success is judged.
+            judged_success, judge_raw = memory_lib.judge_success(ace_ctx["model_name"], confirmed_task, steps_out)
+            induced_raw = memory_lib.induce_memory_for_mode(
+                "ace", ace_ctx["model_name"], confirmed_task, steps_out, judged_success,
+            )
+            candidates = ace_parse_candidate_bullets("\n\n".join(induced_raw))
+            num_added = ace_curate(
+                candidates, ace_ctx["playbook"], task_succeeded=judged_success,
+                cache_path=str(ace_ctx["cache_path"]),
+            )
+            ace_save_playbook(str(ace_ctx["playbook_path"]), ace_ctx["playbook"])
+            result["judged_success"] = judged_success
+            result["judge_raw"] = judge_raw
+            result["memory_induced"] = induced_raw
+            result["ace_candidates"] = len(candidates)
+            result["ace_added"] = num_added
+        except Exception as exc:  # noqa: BLE001 - an induction hiccup shouldn't kill the run
+            result["memory_error"] = f"ace induction error: {type(exc).__name__}: {exc}"
+            print(f"  [ace] {result['memory_error']}", flush=True)
 
     (task_dir / "trajectory.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     write_task_report_html(task_dir, result)
@@ -651,12 +689,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--memory-mode",
         default="none",
-        choices=["none", "reasoningbank", "efm"],
-        help="none (default) = actor-only baseline. reasoningbank = retrieve top-N similar past "
-             "tasks' memory before each task and induce a new memory item after it completes. "
-             "efm = Edit-Free Memory Lifecycle (insertion-time Duplicate/Group/Conflict/Novel "
-             "classification, retrieval-time group collapse + conflict co-injection, "
-             "usage-evidence-based forgetting) -- see efm/ and root EFM_TASK.md.",
+        choices=["none", "synapse", "awm", "reasoningbank", "ace", "efm"],
+        help="none (default) = actor-only baseline. synapse = store the raw successful "
+             "trajectory verbatim, no distillation. awm (Agent Workflow Memory) = distill a "
+             "reusable workflow from successful trajectories only. reasoningbank = distill "
+             "from both success+failure, retrieve top-N similar past tasks' memory before each "
+             "task. ace (Agentic Context Engineering) = evolve a helpful/harmful-voted "
+             "playbook, injected whole each task -- see ace/ (reimplementation, not an import "
+             "of ace-agent/ace; see WebArena/NOTES.md). efm = Edit-Free Memory Lifecycle "
+             "(insertion-time Duplicate/Group/Conflict/Novel classification, retrieval-time "
+             "group collapse + conflict co-injection, usage-evidence-based forgetting) -- see "
+             "efm/ and root EFM_TASK.md.",
     )
     parser.add_argument("--memory-dir", type=Path, default=Path("memories_reasoningbank"))
     parser.add_argument("--memory-top-n", type=int, default=3)
@@ -667,6 +710,7 @@ def parse_args() -> argparse.Namespace:
         help="efm only: how many items to inject per task. Match this to --memory-top-n for a "
              "same-conditions comparison with the reasoningbank arm.",
     )
+    parser.add_argument("--ace-max-bullets", type=int, default=20)
     EFMHParams.add_cli_args(parser)
     parser.add_argument(
         "--scaling-k",
@@ -711,18 +755,19 @@ def main() -> int:
     args.output_root.mkdir(parents=True, exist_ok=True)
 
     memory_ctx = None
-    if args.memory_mode == "reasoningbank" and not args.report_only:
+    if args.memory_mode in ("reasoningbank", "synapse", "awm") and not args.report_only:
         from google import genai
 
         domain_key = domain_label.lower()
         memory_ctx = {
+            "mode": args.memory_mode,
             "embed_client": genai.Client(),
             "memory_bank_path": args.memory_dir / f"{domain_key}.jsonl",
             "embeddings_path": args.memory_dir / f"{domain_key}_embeddings.jsonl",
             "top_n": args.memory_top_n,
             "model_name": args.model,
         }
-        print(f"Memory mode: reasoningbank (bank={memory_ctx['memory_bank_path']}, top_n={args.memory_top_n})")
+        print(f"Memory mode: {args.memory_mode} (bank={memory_ctx['memory_bank_path']}, top_n={args.memory_top_n})")
 
     efm_ctx = None
     if args.memory_mode == "efm" and not args.report_only:
@@ -747,6 +792,20 @@ def main() -> int:
             "client": CLIENT_DICT[args.model](model_name=args.model),
         }
         print(f"Memory mode: efm (dir={efm_dir}, n_inject={args.efm_n_inject})")
+
+    ace_ctx = None
+    if args.memory_mode == "ace" and not args.report_only:
+        domain_key = domain_label.lower()
+        ace_dir = args.memory_dir / domain_key
+        playbook_path = ace_dir / "playbook.json"
+        ace_ctx = {
+            "playbook": ace_load_playbook(str(playbook_path)),
+            "playbook_path": playbook_path,
+            "cache_path": ace_dir / "content_embeddings.jsonl",
+            "max_bullets": args.ace_max_bullets,
+            "model_name": args.model,
+        }
+        print(f"Memory mode: ace (dir={ace_dir}, max_bullets={args.ace_max_bullets})")
 
     multimodal_index = None
     if not args.no_real_screenshots and not args.report_only and (args.multimodal_dir / "train").exists():
@@ -787,7 +846,7 @@ def main() -> int:
                 started = time.monotonic()
                 result = process_task(
                     row, client, renderer, args.output_root, args.max_candidates, memory_ctx, multimodal_index,
-                    scaling_k=args.scaling_k, efm_ctx=efm_ctx,
+                    scaling_k=args.scaling_k, efm_ctx=efm_ctx, ace_ctx=ace_ctx,
                 )
                 elapsed = time.monotonic() - started
                 scaling_note = ""

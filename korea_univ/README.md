@@ -14,11 +14,14 @@ Lifecycle)** — 삽입 시점에 설명(D)/내용(C) 임베딩 유사도로 아
 | 폴더 | 방식 | WebArena | Mind2Web |
 |---|---|---|---|
 | `no_memory/` | 메모리 없음(하한선) | ✅ | ✅ |
-| `synapse/` | 성공 궤적을 통째로 저장(distillation 없음) | ✅ | — |
-| `awm/` (Agent Workflow Memory) | 성공 사례에서 반복 워크플로 추출 | ✅ | — |
+| `synapse/` | 성공 궤적을 통째로 저장(distillation 없음) | ✅ | ✅ |
+| `awm/` (Agent Workflow Memory) | 성공 사례에서 반복 워크플로 추출 | ✅ | ✅ |
 | `reasoningbank/` | **baseline** — 성공/실패 모두 distill, 가장 가까운 experience 통째로 주입 | ✅ | ✅ |
-| `ace/` (Agentic Context Engineering) | Reflector가 bullet 추출 → helpful/harmful 투표로 playbook 진화 (재구현, `NOTES.md` 참고) | ✅ | — |
+| `ace/` (Agentic Context Engineering) | Reflector가 bullet 추출 → helpful/harmful 투표로 playbook 진화 (재구현, `NOTES.md` 참고) | ✅ | ✅ |
 | `efm/` (Edit-Free Memory Lifecycle) | **우리 연구** — D/C 유사도 기반 분류·그룹·충돌 관리 + 사용 증거 기반 삭제 | ✅ | ✅ |
+
+이제 6가지 기법 전부 **두 벤치마크 모두에서** 바로 돌릴 수 있습니다(`synapse`/`awm`/`ace`의
+Mind2Web 포팅은 WebArena 쪽 프롬프트·알고리즘을 그대로 재사용 — `NOTES.md` 참고).
 
 ```bash
 cd efm
