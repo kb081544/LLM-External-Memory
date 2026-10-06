@@ -6,15 +6,29 @@ Lifecycle)** — 삽입 시점에 설명(D)/내용(C) 임베딩 유사도로 아
 안 쓰이는 메모리를 삭제(forgetting)하는 메모리 관리 기법 — 을 구현하고 baseline(ReasoningBank의
 단순 누적 주입)과 비교하는 연구 코드입니다.
 
-세 가지 arm(조건)을 비교합니다:
+**6가지 메모리 기법**을 비교합니다 — 코드는 최상위에 **방법론별로** 정리돼 있고(`no_memory/`,
+`synapse/`, `awm/`, `reasoningbank/`, `ace/`, `efm/`), 각 폴더 안에 벤치마크별 실행 스크립트가
+있습니다. 벤치마크(WebArena/Mind2Web)의 실제 코드·데이터는 각자의 폴더에 그대로 있고, 아래
+방법론 폴더들은 거기로 들어가서 올바른 플래그로 호출해주는 역할만 합니다.
 
-| arm | 메모리 사용 | 설명 |
-|---|---|---|
-| `no_memory` | 없음 | 메모리 없이 순수 에이전트 성능 (하한선) |
-| `reasoningbank` | baseline | 원 논문의 방식 — 가장 가까운 과거 experience의 메모리를 전부, 수정 없이 누적 주입 |
-| `efm` | 우리 연구 | D/C 유사도 기반 분류·그룹·충돌 관리 + 사용 증거 기반 삭제 |
+| 폴더 | 방식 | WebArena | Mind2Web |
+|---|---|---|---|
+| `no_memory/` | 메모리 없음(하한선) | ✅ | ✅ |
+| `synapse/` | 성공 궤적을 통째로 저장(distillation 없음) | ✅ | — |
+| `awm/` (Agent Workflow Memory) | 성공 사례에서 반복 워크플로 추출 | ✅ | — |
+| `reasoningbank/` | **baseline** — 성공/실패 모두 distill, 가장 가까운 experience 통째로 주입 | ✅ | ✅ |
+| `ace/` (Agentic Context Engineering) | Reflector가 bullet 추출 → helpful/harmful 투표로 playbook 진화 (재구현, `NOTES.md` 참고) | ✅ | — |
+| `efm/` (Edit-Free Memory Lifecycle) | **우리 연구** — D/C 유사도 기반 분류·그룹·충돌 관리 + 사용 증거 기반 삭제 | ✅ | ✅ |
 
-같은 3-arm 비교를 **두 벤치마크**에서 돌릴 수 있습니다 — 상황에 맞게 고르세요:
+```bash
+cd efm
+./run_webarena.sh     # Docker 쇼핑몰 사이트 필요
+./run_mind2web.sh     # Docker 불필요, download_data.py만 하면 바로 실행
+```
+
+각 방법론 폴더의 `README.md`에 벤치마크별 지원 여부와 정확한 실행 명령이 있습니다.
+
+같은 비교를 **두 벤치마크**에서 돌릴 수 있습니다 — 상황에 맞게 고르세요:
 
 | | WebArena | Mind2Web |
 |---|---|---|
@@ -79,79 +93,17 @@ claude   # 최초 1회, 해당 프로필로 로그인
 다른 백본(Gemini API 직접 호출, Antigravity CLI 등)을 쓰고 싶으면 `--model` 값만 바꾸면 됩니다 —
 `WebArena/utils/clients.py`의 `CLIENT_DICT`에 등록된 키 목록 참고.
 
-## 방식별로 바로 돌려보기 (`WebArena/comparisons/`)
+## 공통 옵션
 
-6가지 메모리 기법(no_memory / synapse / awm / reasoningbank / ace / efm)이 폴더별로 분리돼 있어서
-헷갈리지 않고 하나씩 바로 실행할 수 있습니다 — 자세한 설명은
-**[`WebArena/comparisons/README.md`](WebArena/comparisons/README.md)** 참고:
-
-```bash
-cd WebArena/comparisons/efm
-./run.sh
-```
-
-`ace`는 ACE(Agentic Context Engineering, arXiv:2510.04618) 논문의 알고리즘을 이 코드베이스에 맞게
-재구현한 것입니다(원 코드 `ace-agent/ace`는 단일 QA 형식이라 WebArena의 멀티스텝 구조에 그대로
-꽂을 수 없어, 알고리즘만 재현했습니다 — 자세한 내용은 `NOTES.md`).
-
-## 실행 방법 (Mind2Web) — Docker 없이, 빠르게
-
-```bash
-cd Mind2Web
-python download_data.py   # 최초 1회, HuggingFace에서 Shopping 도메인 다운로드
-
-# 1) none arm — 메모리 없음, 하한선
-python run.py --model ccli-sonnet --memory-mode none --output-root results_none --limit 80
-
-# 2) reasoningbank arm — baseline
-python run.py --model ccli-sonnet --memory-mode reasoningbank --memory-dir memories_reasoningbank_run \
-    --output-root results_reasoningbank --limit 80
-
-# 3) efm arm — 우리 연구
-python run.py --model ccli-sonnet --memory-mode efm --memory-dir memories_efm_run \
-    --output-root results_efm --limit 80 --efm-n-inject 3
-```
-
-- `--limit 80`: 샘플링할 태스크 수(시드 고정, `results_*/manifest.json`에 기록돼 매번 동일 태스크
-  재현). 세 arm을 같은 태스크로 비교하려면 `--task-source results_none/manifest.json`으로 첫 arm의
-  manifest를 재사용하세요(태스크 목록을 그대로 슬라이스).
-- 결과는 `--output-root`에 `mind2web.<annotation_id>/trajectory.json`으로 쌓이고, `task_success`
-  필드(ground-truth 요소/동작/값 매칭)가 성공 여부입니다. `review.html`에서 스크린샷과 함께 훑어볼
-  수 있습니다.
-- `--report-only`로 LLM 호출 없이 기존 결과에서 리포트만 재생성할 수 있습니다.
-- EFM 하이퍼파라미터는 `--efm-*` 플래그(하이픈 표기) — `Mind2Web/efm/hparams.py` 참고, 기본값은
-  WebArena 쪽과 동일.
-
-## 실행 방법 (WebArena) — Docker 사이트가 이미 있는 경우
-
-세 arm은 **완전히 분리된 결과/메모리 디렉터리**를 쓰므로 서로 간섭하지 않습니다. 순서 상관없이
-독립적으로 실행 가능합니다(단, 같은 Docker 쇼핑몰 사이트를 공유하므로 동시에 병렬 실행은 피하세요 —
-사이트 상태가 섞일 수 있습니다).
-
-```bash
-cd WebArena
-
-# 1) no_memory arm — 메모리 없음, 하한선
-python pipeline_memory.py --website shopping --model ccli-sonnet --memory_mode no_memory \
-    --output_dir results_no_memory --end_index 80
-
-# 2) reasoningbank arm — baseline (원 논문 방식)
-python pipeline_memory.py --website shopping --model ccli-sonnet --memory_mode reasoningbank \
-    --memory_dir memories_reasoningbank_run --output_dir results_reasoningbank --end_index 80
-
-# 3) efm arm — 우리 연구
-python pipeline_memory.py --website shopping --model ccli-sonnet --memory_mode efm \
-    --memory_dir memories_efm_run --output_dir results_efm --end_index 80 --efm_n_inject 3
-```
-
-- `--end_index 80`: 전체 187개 중 처음 80개만(쿼터 상황에 따라 조절). 187개 전체를 돌리려면 이 옵션을
-  빼세요.
-- `--prev_id N`: 중간에 중단됐을 때 태스크 id가 N 이하인 것들을 건너뛰고 이어서 재개(이미 완료된 건
-  안 날아감).
-- 각 arm의 결과는 `--output_dir`로 지정한 디렉터리에 `webarena.<task_id>/` 폴더별로 쌓입니다
-  (스텝 기록, judge 판정 포함).
-- EFM 하이퍼파라미터(`TAU_D`, `TAU_C`, `ETA`, `T_STALE` 등)는 `--efm_*` 플래그로 조절 가능 —
-  `WebArena/efm/hparams.py` 참고. 기본값은 `EFM_TASK.md` 3.7절 표와 동일.
+- WebArena 쪽 스크립트: `--end_index 80`(처음 80개, 187개 전체면 이 옵션 빼기), `--prev_id N`(중단 후
+  재개), `--efm_n_inject`/`--efm_*`(EFM 하이퍼파라미터, `WebArena/efm/hparams.py` 참고).
+- Mind2Web 쪽 스크립트: `--limit 80`(시드 고정, `results_*/manifest.json`에 기록돼 재현 가능),
+  `--report-only`(LLM 호출 없이 리포트만 재생성), `--efm-n-inject`/`--efm-*`(하이픈 표기, 기본값은
+  WebArena와 동일).
+- 각 방법론 폴더의 스크립트는 전부 `"$@"`로 추가 플래그를 그대로 전달합니다 — 예:
+  `./run_webarena.sh --end_index 187`.
+- 같은 벤치마크 안에서 여러 방법론을 돌려도 결과/메모리 디렉터리가 전부 분리돼 있어 서로 안
+  섞입니다(단, WebArena는 같은 Docker 사이트를 공유하므로 동시 병렬 실행은 피하세요).
 
 ## 결과 집계
 
