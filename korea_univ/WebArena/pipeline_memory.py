@@ -124,10 +124,14 @@ def main():
     memory_dir = args.memory_dir or f"memories_{args.memory_mode}"
     is_pruned = args.memory_mode == "reasoningbank_pruned"
     is_efm = args.memory_mode == "efm"
+    is_ace = args.memory_mode == "ace"
     prune_counter = 0
     efm_hp = EFMHParams.from_args(args) if is_efm else None
     efm_dir = f"{memory_dir}/{args.website}" if is_efm else None
     efm_client = CLIENT_DICT[args.model](model_name=args.model) if is_efm else None
+    ace_dir = f"{memory_dir}/{args.website}" if is_ace else None
+    ace_playbook_path = f"{ace_dir}/playbook.json" if is_ace else None
+    ace_cache_path = f"{ace_dir}/content_embeddings.jsonl" if is_ace else None
 
     # collect examples
     config_files = [
@@ -184,6 +188,8 @@ def main():
                 "--efm_n_inject", str(args.efm_n_inject),
                 "--usage_log_path", f"{memory_dir}/{args.website}_usage.jsonl",
             ]
+        if is_ace:
+            run_cmd += ["--ace_dir", ace_dir, "--ace_max_bullets", str(args.ace_max_bullets)]
         run_ok = False
         for attempt in range(1, args.run_retries + 2):
             print(
@@ -281,7 +287,11 @@ def main():
             "--criteria", args.judge,
             "--memory_mode", "reasoningbank" if (is_pruned or is_efm) else args.memory_mode,
             "--model", args.model,
-            "--output_path", f"{efm_dir}/_raw.jsonl" if is_efm else f"{memory_dir}/{args.website}.jsonl",
+            "--output_path", (
+                f"{efm_dir}/_raw.jsonl" if is_efm
+                else f"{ace_dir}/_raw.jsonl" if is_ace
+                else f"{memory_dir}/{args.website}.jsonl"
+            ),
         ]
         returncode = run_with_idle_timeout(
             memory_cmd,
@@ -318,6 +328,24 @@ def main():
 
             efm_store.save_json(f"{efm_dir}/now.json", {"now": now + 1})
 
+        elif is_ace:
+            from ace.playbook import load_playbook, save_playbook
+            from ace.curate import parse_candidate_bullets, curate
+
+            with open(f"{ace_dir}/_raw.jsonl", encoding="utf-8") as f:
+                raw_entry = json.loads(f.readlines()[-1])
+            candidates = parse_candidate_bullets("\n\n".join(raw_entry["memory_items"]))
+            playbook = load_playbook(ace_playbook_path)
+            num_added = curate(
+                candidates, playbook, task_succeeded=(raw_entry["status"] == "success"),
+                cache_path=ace_cache_path,
+            )
+            save_playbook(ace_playbook_path, playbook)
+            print(
+                f"[pipeline] ace: {len(candidates)} candidate bullet(s), {num_added} new "
+                f"(rest merged as helpful/harmful votes) after task {tid}.", flush=True,
+            )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -330,7 +358,7 @@ if __name__ == "__main__":
                         choices=["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "claude-3-7-sonnet@20250219", "gemini-2.5-pro", "google/gemma-3-12b-it", "agy-claude-sonnet-4-6", "ccli-sonnet"])
     parser.add_argument("--prev_id", type=int, default=-1)
     parser.add_argument("--memory_mode", type=str, default="reasoningbank",
-                        choices=["no_memory", "reasoningbank", "awm", "synapse", "reasoningbank_pruned", "efm"])
+                        choices=["no_memory", "reasoningbank", "awm", "synapse", "reasoningbank_pruned", "efm", "ace"])
     parser.add_argument("--memory_dir", type=str, default=None,
                         help="Override the memory directory (default: memories_<memory_mode>). "
                              "Use to keep a test run's memory bank separate from the main one.")
@@ -361,6 +389,13 @@ if __name__ == "__main__":
         help="efm only: how many items to inject per task, matched to baseline's *measured* "
              "average injection count (EFM_TASK.md 3.2/5.1) -- set this from the sanity-check "
              "measurement before the real run, not left at the placeholder default.",
+    )
+    parser.add_argument(
+        "--ace_max_bullets",
+        type=int,
+        default=20,
+        help="ace only: cap on how many playbook bullets get injected per task (ranked by "
+             "helpful-harmful utility).",
     )
     EFMHParams.add_cli_args(parser)
     args = parser.parse_args()

@@ -343,3 +343,37 @@ claude_cli_client.py}` 추가 + `clients.py`에 등록(`agy-claude-sonnet-4-6`, 
 **검증 상태**: 3-태스크 생티티 체크 시도했으나 두 번째 Claude 계정의 세션 한도(19시 리셋)가 아직
 안 풀려서 judge/추출 호출이 막힘(코드 버그 아님, graceful하게 에러 로깅하고 안 죽음 — 확인됨). 쿼터
 리셋 후 재검증 필요.
+
+## 2026-10-06 — ACE(Agentic Context Engineering) 비교군 추가 + 폴더별 정리
+
+사용자가 논문 비교 대상으로 ACE, Skill-Pro, MemRL을 검토 요청 → 조사 결과 코드 재사용 가능성 평가:
+- **ACE**(github.com/ace-agent/ace, ICLR 2026): DataProcessor 추상화(process_task_data/
+  answer_is_correct/evaluate_accuracy)가 단일 QA 형식 전용이라 WebArena의 멀티스텝 액션 루프에
+  직접 꽂을 수 없음 — 알고리즘만 재구현하기로 결정(원 코드 import 아님).
+- **Skill-Pro**(TextArena/ALFWorld 전용), **MemRL**(HLE/ALFWorld/BigCodeBench/LifelongAgentBench
+  전용, RL 학습 루프 포함): 상태 표현이 웹 탐색과 근본적으로 달라 어댑터 작업이 EFM 재구현 수준으로
+  커서 보류 — related work 인용으로만 처리.
+- **SF-AMS**(Strategic Forgetting, EFM의 forgetting과 개념적으로 가까움): 공개 코드 없음 + 대화형
+  개인 메모리 벤치마크(LoCoMo/LongMemEval) 전용이라 실험 재현 불가 — 인용만.
+
+**발견**: AWM/Synapse는 이미 `induce_memory.py`에 구현돼 있었음(`--memory_mode awm`/`synapse`) —
+새로 포팅할 필요 전혀 없이 바로 비교 가능.
+
+**ACE 구현**: `WebArena/ace/`(`playbook.py`, `curate.py`) 신규 — Reflector(기존 induce_memory.py에
+`ace` 분기 추가, `prompts/memory_instruction.py`의 `ACE_REFLECTOR_SI/FI`)는 reasoningbank/awm/
+synapse와 동일하게 stateless(trajectory in, bullet 후보 out)로 유지하고, 플레이북 대비 중복 판정
++ helpful/harmful 투표는 `ace/curate.py`에서 EFM의 임베딩 코사인 유사도 방식을 그대로 재사용(TAU=0.85).
+검색은 쿼리별 유사도 검색이 아니라 **전체 플레이북을 매 태스크 주입**(utility 상위 N개로 상한,
+ACE 논문의 실제 설계와 일치). `run.py`에 `--ace_dir` 분기 추가(단순 포맷+쓰기, retrieve() 호출 없음).
+단위테스트 15/15 통과(`ace/test_ace_units.py`).
+
+**실제 버그 1건 발견·수정**: 샌티티 테스트 중 LLM이 출력 전체를 마크다운 코드펜스(```)로 감싸서
+bullet 파싱이 깨짐(2개 중 1개만 파싱됨) — `induce_memory.py`의 ace 분기에 Mind2Web/memory.py가
+이미 쓰던 것과 동일한 펜스 제거 로직 추가 + `ace/curate.py`에도 방어적으로 블록별 백틱 제거 추가.
+
+**검증**: 5개 태스크 샌티티 테스트(shopping) — 실패 0건, 성공 2/실패 3, 플레이북 10개 bullet로
+성장, 중복 병합(같은 전략이 helpful=2로 재확인)도 실제로 작동 확인.
+
+**폴더 구조**: `WebArena/comparisons/{no_memory,synapse,awm,reasoningbank,ace,efm}/run.sh` +
+최상위 `README.md` — 교수님 등 제3자가 방식별로 쉽게 구분해서 바로 돌려볼 수 있게 정리(전부 같은
+`pipeline_memory.py`를 `--memory_mode`만 다르게 호출, 결과/메모리 디렉터리는 전부 분리).

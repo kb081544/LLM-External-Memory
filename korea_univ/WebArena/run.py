@@ -181,6 +181,16 @@ def parse_args():
     parser.add_argument("--efm_gamma", type=float, default=0.98)
     parser.add_argument("--efm_n_inject", type=int, default=1)
     parser.add_argument(
+        "--ace_dir",
+        type=str,
+        default=None,
+        help="If set, inject the current ACE playbook (ace/playbook.py) into --memory_path "
+             "instead of letting the reasoningbank-style select_memory() branch below run. "
+             "No per-query retrieval -- ACE injects the whole (size-capped) evolving playbook "
+             "every task, matching the paper's design.",
+    )
+    parser.add_argument("--ace_max_bullets", type=int, default=20)
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="DEBUG-level logging to console + experiment.log, so per-step "
@@ -195,7 +205,18 @@ def main():
 
     args = parse_args()
 
-    if args.efm_dir:
+    if args.ace_dir:
+        ensure_file(args.memory_path)
+        os.makedirs(args.ace_dir, exist_ok=True)  # first task of a fresh run: induce_memory.py's
+        # --output_path {ace_dir}/_raw.jsonl (step 3) needs this dir to already exist.
+        from ace.playbook import load_playbook, format_playbook_for_prompt
+
+        playbook = load_playbook(f"{args.ace_dir}/playbook.json")
+        block = format_playbook_for_prompt(playbook, max_bullets=args.ace_max_bullets)
+        with open(args.memory_path, "w") as f:
+            f.write(block + ("\n" if block else ""))
+
+    elif args.efm_dir:
         ensure_file(args.memory_path)
         os.makedirs(args.efm_dir, exist_ok=True)  # first task of a fresh run: nothing else
         # creates this dir before store.load_cache()'s create-empty-cache-file fallback runs.

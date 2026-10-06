@@ -291,3 +291,68 @@ To browse the products in the Cabinets, Racks & Shelves category, I need to clic
 click('racks_shelves_drawers_id')
 </action>
 """
+
+# ACE (Agentic Context Engineering, arXiv:2510.04618) baseline -- reimplemented in our own
+# pipeline the same way AWM/Synapse above are (a standalone prompt + induction call), not by
+# importing github.com/ace-agent/ace's package directly: their DataProcessor abstraction is
+# built for single-shot QA-style tasks (process_task_data/answer_is_correct/evaluate_accuracy),
+# not our multi-step WebArena action loop, so it wouldn't wire into run.py's live episode
+# without the same amount of adaptation work as a reimplementation needs anyway. The real
+# ACE's Reflector sees the *current playbook* and either increments an existing bullet's
+# helpful/harmful count or proposes a brand-new one; this prompt only produces fresh candidate
+# bullets (dedup-vs-existing-playbook happens afterward in ace/curate.py via embedding
+# similarity, not inside this prompt) to keep induce_memory.py's call signature identical to
+# reasoningbank/awm/synapse (stateless: trajectory in, text out).
+ACE_REFLECTOR_SI = """
+You are an expert in web navigation, acting as the "Reflector" in an Agentic Context Engineering
+(ACE) pipeline. You will be given a user query and the trajectory of an agent that
+**successfully accomplished the task**.
+
+## Guidelines
+Extract concrete, reusable insight bullets a "playbook" of strategies could add. Each bullet
+should be a single, standalone, actionable tip -- not a narrative summary of this one task.
+
+## Important notes
+  - You can extract *at most 3* bullets.
+  - Do not repeat similar or overlapping bullets.
+  - Do not embed specific product names, queries, or literal string contents from the task.
+  - Tag each bullet with ONE section: "strategy" (a reusable procedure), "formula" (a
+    reusable fact/calculation rule), or "mistake" (a pitfall worth naming even on a success,
+    e.g. a near-miss the agent caught).
+
+## Output Format
+Your output must strictly follow this format, one bullet per block, separated by a blank line:
+
+```
+[strategy] <one self-contained, actionable sentence>
+
+[formula] <one self-contained, actionable sentence>
+```
+"""
+
+ACE_REFLECTOR_FI = """
+You are an expert in web navigation, acting as the "Reflector" in an Agentic Context Engineering
+(ACE) pipeline. You will be given a user query and the trajectory of an agent that
+**attempted the task but failed**.
+
+## Guidelines
+Extract concrete, reusable insight bullets a "playbook" of strategies could add so this failure
+mode is avoided next time. Each bullet should be a single, standalone, actionable tip -- not a
+narrative summary of this one task.
+
+## Important notes
+  - You can extract *at most 3* bullets.
+  - Do not repeat similar or overlapping bullets.
+  - Do not embed specific product names, queries, or literal string contents from the task.
+  - Tag each bullet with ONE section: "strategy" (a reusable procedure to use instead),
+    "formula" (a reusable fact/calculation rule), or "mistake" (the specific pitfall to avoid).
+
+## Output Format
+Your output must strictly follow this format, one bullet per block, separated by a blank line:
+
+```
+[mistake] <one self-contained, actionable sentence>
+
+[strategy] <one self-contained, actionable sentence>
+```
+"""

@@ -22,7 +22,9 @@ import argparse
 from functools import partial
 import time
 
-from prompts.memory_instruction import SUCCESSFUL_SI, FAILED_SI, AWM_INSTRUCTION, AWM_EXAMPLE
+from prompts.memory_instruction import (
+    SUCCESSFUL_SI, FAILED_SI, AWM_INSTRUCTION, AWM_EXAMPLE, ACE_REFLECTOR_SI, ACE_REFLECTOR_FI,
+)
 from utils.clients import CLIENT_DICT
 
 
@@ -172,6 +174,23 @@ def main():
     elif args.memory_mode == "synapse":
         if ex['status'] == 'success':
             generated_memory_item = trajectory
+
+    elif args.memory_mode == "ace":
+        # ACE's Reflector step (see prompts/memory_instruction.py's ACE_REFLECTOR_SI/FI
+        # docstring for why this is a reimplementation, not an import of ace-agent/ace).
+        # Produces fresh candidate bullets only -- the playbook-aware
+        # dedup/helpful-harmful-vote step happens afterward in ace/curate.py, which has
+        # access to the persistent playbook state this stateless call doesn't.
+        system_msg = ACE_REFLECTOR_SI if ex['status'] == 'success' else ACE_REFLECTOR_FI
+        generated_memory_item, _ = llm_client.one_step_chat(trajectory, system_msg=system_msg, temperature=0.7)
+        # Models sometimes wrap the whole response in a code fence despite the prompt's
+        # example not showing one -- strip it so ace/curate.py's per-block "[section] ..."
+        # regex isn't thrown off by a leading/trailing ``` line (same fix Mind2Web/memory.py
+        # already applies to its own induce_memory() output).
+        generated_memory_item = (generated_memory_item or "").strip()
+        if generated_memory_item.startswith("```"):
+            generated_memory_item = re.sub(r"^```[a-zA-Z]*\n?", "", generated_memory_item)
+            generated_memory_item = re.sub(r"\n?```$", "", generated_memory_item)
 
     # write memory to jsonl file 
     with open(args.output_path, 'a') as f:

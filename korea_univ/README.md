@@ -79,6 +79,21 @@ claude   # 최초 1회, 해당 프로필로 로그인
 다른 백본(Gemini API 직접 호출, Antigravity CLI 등)을 쓰고 싶으면 `--model` 값만 바꾸면 됩니다 —
 `WebArena/utils/clients.py`의 `CLIENT_DICT`에 등록된 키 목록 참고.
 
+## 방식별로 바로 돌려보기 (`WebArena/comparisons/`)
+
+6가지 메모리 기법(no_memory / synapse / awm / reasoningbank / ace / efm)이 폴더별로 분리돼 있어서
+헷갈리지 않고 하나씩 바로 실행할 수 있습니다 — 자세한 설명은
+**[`WebArena/comparisons/README.md`](WebArena/comparisons/README.md)** 참고:
+
+```bash
+cd WebArena/comparisons/efm
+./run.sh
+```
+
+`ace`는 ACE(Agentic Context Engineering, arXiv:2510.04618) 논문의 알고리즘을 이 코드베이스에 맞게
+재구현한 것입니다(원 코드 `ace-agent/ace`는 단일 QA 형식이라 WebArena의 멀티스텝 구조에 그대로
+꽂을 수 없어, 알고리즘만 재현했습니다 — 자세한 내용은 `NOTES.md`).
+
 ## 실행 방법 (Mind2Web) — Docker 없이, 빠르게
 
 ```bash
