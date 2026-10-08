@@ -125,6 +125,8 @@ def main():
     is_pruned = args.memory_mode == "reasoningbank_pruned"
     is_efm = args.memory_mode == "efm"
     is_ace = args.memory_mode == "ace"
+    is_reme = args.memory_mode == "reme"
+    is_memp = args.memory_mode == "memp"
     prune_counter = 0
     efm_hp = EFMHParams.from_args(args) if is_efm else None
     efm_dir = f"{memory_dir}/{args.website}" if is_efm else None
@@ -132,6 +134,11 @@ def main():
     ace_dir = f"{memory_dir}/{args.website}" if is_ace else None
     ace_playbook_path = f"{ace_dir}/playbook.json" if is_ace else None
     ace_cache_path = f"{ace_dir}/content_embeddings.jsonl" if is_ace else None
+    reme_dir = f"{memory_dir}/{args.website}" if is_reme else None
+    memp_dir = f"{memory_dir}/{args.website}" if is_memp else None
+    arm_client = (
+        CLIENT_DICT[args.model](model_name=args.model) if (is_reme or is_memp) else None
+    )
 
     # collect examples
     config_files = [
@@ -190,6 +197,14 @@ def main():
             ]
         if is_ace:
             run_cmd += ["--ace_dir", ace_dir, "--ace_max_bullets", str(args.ace_max_bullets)]
+        if is_reme:
+            run_cmd += ["--reme_dir", reme_dir, "--reme_top_k", str(args.reme_top_k)]
+        if is_memp:
+            run_cmd += [
+                "--memp_dir", memp_dir,
+                "--memp_top_k", str(args.memp_top_k),
+                "--memp_build", args.memp_build,
+            ]
         run_ok = False
         for attempt in range(1, args.run_retries + 2):
             print(
@@ -263,6 +278,27 @@ def main():
                         flush=True,
                     )
 
+        if is_reme:
+            # ReMe's utility bookkeeping (paper 3.4): u increments only when a retrieved
+            # experience was in play on a task the judge called a success. Done here, before
+            # extraction, so the credit is attributed to the bank state the agent actually saw.
+            from reme import experience as reme_store
+            from reme.utility import credit_outcome as reme_credit, prune as reme_prune
+
+            now = reme_store.load_items(f"{reme_dir}/now.json").get("now", 0)
+            items = reme_store.load_items(f"{reme_dir}/items.json")
+            injected_ids = reme_store.load_items(f"{reme_dir}/last_injected.json").get("ids", [])
+            injected = [(iid, items[iid]) for iid in injected_ids if iid in items]
+            judged_success = read_task_outcome(args.output_dir, tid, args.judge, args.model)
+            reme_credit(injected, judged_success=judged_success, now=now,
+                        events_path=f"{reme_dir}/reme_events.jsonl", task_id=tid)
+            num_deleted = reme_prune(items, now=now, events_path=f"{reme_dir}/reme_events.jsonl",
+                                     alpha=args.reme_alpha, beta=args.reme_beta)
+            reme_store.save_items(f"{reme_dir}/items.json", items)
+            if num_deleted:
+                print(f"[pipeline] reme deleted {num_deleted} low-utility experience(s) "
+                      f"after task {tid}.", flush=True)
+
         if is_efm:
             now = efm_store.load_json(f"{efm_dir}/now.json", {"now": 0})["now"]
             injected_ids = efm_store.load_json(f"{efm_dir}/last_injected.json", [])
@@ -290,6 +326,8 @@ def main():
             "--output_path", (
                 f"{efm_dir}/_raw.jsonl" if is_efm
                 else f"{ace_dir}/_raw.jsonl" if is_ace
+                else f"{reme_dir}/_raw.jsonl" if is_reme
+                else f"{memp_dir}/_raw.jsonl" if is_memp
                 else f"{memory_dir}/{args.website}.jsonl"
             ),
         ]
@@ -346,6 +384,94 @@ def main():
                 f"(rest merged as helpful/harmful votes) after task {tid}.", flush=True,
             )
 
+        elif is_reme:
+            from reme import experience as reme_store
+            from reme.extract import parse_experiences
+            from reme.compare import find_counterpart, comparative_extract
+            from efm import store as efm_store_mod
+
+            with open(f"{reme_dir}/_raw.jsonl", encoding="utf-8") as f:
+                raw_entry = json.loads(f.readlines()[-1])
+            now = reme_store.load_items(f"{reme_dir}/now.json").get("now", 0)
+            items = reme_store.load_items(f"{reme_dir}/items.json")
+
+            parsed = parse_experiences("\n\n".join(raw_entry["memory_items"]))
+            facets = [("success" if raw_entry["status"] == "success" else "failure", p)
+                      for p in parsed]
+
+            # Third analysis: comparative, only when this task has a success/fail counterpart
+            # of the same intent_template_id (see reme/compare.py).
+            counterpart = find_counterpart(
+                f"{reme_dir}/_raw.jsonl", raw_entry.get("template_id"), raw_entry["status"], tid,
+            )
+            if counterpart is not None:
+                try:
+                    comp_raw = comparative_extract(arm_client, raw_entry, counterpart)
+                    facets += [("comparative", p) for p in parse_experiences(comp_raw)]
+                except Exception as exc:
+                    print(f"[pipeline] reme comparative extraction failed: "
+                          f"{type(exc).__name__}: {exc}", flush=True)
+
+            new_ids = []
+            for facet, parsed_item in facets:
+                iid = reme_store.next_id(items)
+                items[iid] = reme_store.new_item(parsed_item, task_id=tid,
+                                                 status=raw_entry["status"], now=now, facet=facet)
+                # Retrieval is indexed on the usage scenario (paper 4.3), so that is what gets
+                # embedded into the scenario cache.
+                efm_store_mod.embed_and_cache(
+                    parsed_item["scenario"], f"{reme_dir}/scenario_embeddings.jsonl", iid,
+                )
+                new_ids.append(iid)
+
+            reme_store.save_items(f"{reme_dir}/items.json", items)
+            reme_store.save_items(f"{reme_dir}/now.json", {"now": now + 1})
+            n_comp = sum(1 for facet, _ in facets if facet == "comparative")
+            print(f"[pipeline] reme stored {len(new_ids)} experience(s) "
+                  f"({n_comp} comparative) after task {tid}.", flush=True)
+
+        elif is_memp:
+            from memp import procedure as memp_store
+            from memp.update import apply_update
+            from efm import store as efm_store_mod
+
+            with open(f"{memp_dir}/_raw.jsonl", encoding="utf-8") as f:
+                raw_entry = json.loads(f.readlines()[-1])
+            now = memp_store.load_procedures(f"{memp_dir}/now.json").get("now", 0)
+            procs = memp_store.load_procedures(f"{memp_dir}/procedures.json")
+            injected_ids = memp_store.load_procedures(
+                f"{memp_dir}/last_injected.json").get("ids", [])
+            injected = [(pid, procs[pid]) for pid in injected_ids if pid in procs]
+
+            parsed = memp_store.parse_procedure("\n\n".join(raw_entry["memory_items"]))
+            trajectory_text = "\n\n".join(
+                f"<think>\n{t}\n</think>\n<action>\n{a}\n</action>"
+                for t, a in zip(raw_entry.get("think_list", []), raw_entry.get("action_list", []))
+            )
+            judged_success = raw_entry["status"] == "success"
+
+            new_pid, adjusted = apply_update(
+                args.memp_update, procs, parsed, judged_success=judged_success,
+                injected=injected, query=raw_entry["query"], trajectory=trajectory_text,
+                task_id=tid, now=now, client=arm_client,
+                events_path=f"{memp_dir}/memp_events.jsonl",
+            )
+            if new_pid is not None:
+                # Key=Query retrieval (paper 4.2): the source task's query is the index key.
+                efm_store_mod.embed_and_cache(
+                    raw_entry["query"], f"{memp_dir}/key_embeddings.jsonl", new_pid,
+                )
+            if adjusted:
+                # The revised procedure keeps its key embedding: Memp's Adjustment rewrites
+                # the procedure body, not what task class it answers.
+                pass
+
+            memp_store.save_procedures(f"{memp_dir}/procedures.json", procs)
+            memp_store.save_procedures(f"{memp_dir}/now.json", {"now": now + 1})
+            action = ("appended " + new_pid) if new_pid else ("adjusted in place" if adjusted
+                                                              else "no change")
+            print(f"[pipeline] memp ({args.memp_update}): {action} after task {tid}.", flush=True)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -358,7 +484,7 @@ if __name__ == "__main__":
                         choices=["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "claude-3-7-sonnet@20250219", "gemini-2.5-pro", "google/gemma-3-12b-it", "agy-claude-sonnet-4-6", "ccli-sonnet"])
     parser.add_argument("--prev_id", type=int, default=-1)
     parser.add_argument("--memory_mode", type=str, default="reasoningbank",
-                        choices=["no_memory", "reasoningbank", "awm", "synapse", "reasoningbank_pruned", "efm", "ace"])
+                        choices=["no_memory", "reasoningbank", "awm", "synapse", "reasoningbank_pruned", "efm", "ace", "reme", "memp"])
     parser.add_argument("--memory_dir", type=str, default=None,
                         help="Override the memory directory (default: memories_<memory_mode>). "
                              "Use to keep a test run's memory bank separate from the main one.")
@@ -396,6 +522,46 @@ if __name__ == "__main__":
         default=20,
         help="ace only: cap on how many playbook bullets get injected per task (ranked by "
              "helpful-harmful utility).",
+    )
+    parser.add_argument(
+        "--reme_top_k",
+        type=int,
+        default=3,
+        help="reme only: how many experiences to inject per task (ReMe retrieves top-k by "
+             "usage-scenario similarity).",
+    )
+    parser.add_argument(
+        "--reme_alpha",
+        type=int,
+        default=5,
+        help="reme only: minimum retrievals before an experience can be deleted (paper's alpha).",
+    )
+    parser.add_argument(
+        "--reme_beta",
+        type=float,
+        default=0.5,
+        help="reme only: delete when u/f <= beta once f >= alpha (paper's beta).",
+    )
+    parser.add_argument(
+        "--memp_top_k",
+        type=int,
+        default=1,
+        help="memp only: how many procedures to inject per task.",
+    )
+    parser.add_argument(
+        "--memp_build",
+        type=str,
+        default="proceduralization",
+        choices=["script", "trajectory", "proceduralization"],
+        help="memp only: which BUILD condition to inject (paper 4.2).",
+    )
+    parser.add_argument(
+        "--memp_update",
+        type=str,
+        default="adjustment",
+        choices=["vanilla", "validation", "adjustment"],
+        help="memp only: which UPDATE strategy to apply (paper 4.3). 'adjustment' is the one "
+             "that rewrites an existing procedure in place on failure.",
     )
     EFMHParams.add_cli_args(parser)
     args = parser.parse_args()

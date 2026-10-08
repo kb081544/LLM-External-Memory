@@ -146,3 +146,149 @@ Your output must strictly follow this format, one bullet per block, separated by
 [strategy] <one self-contained, actionable sentence>
 ```
 """
+
+
+# --- ReMe (Remember Me, Refine Me; Findings of ACL 2026) -------------------------------
+# Reimplemented here rather than imported from agentscope-ai/ReMe for the same reason ACE is
+# (above): the released code is built around BFCL-V3 / AppWorld tool-call episodes with its
+# own agent loop and vector store. The paper's extraction step runs THREE analyses over a
+# task's trajectories -- success-pattern, failure-analysis, and a comparative analysis that
+# contrasts a successful against a failed trajectory of the same task (3.2). The first two are
+# per-trajectory and map directly onto our one-trajectory-per-task pipeline; the comparative
+# one needs a success/fail pair, which reme/compare.py supplies when an earlier task on the same
+# website had the opposite outcome (Mind2Web rows carry no intent_template_id).
+# The schema asked for below is the paper's E = <omega (when to use), e (content),
+# kappa (keywords), c (confidence)>; tau (tools) is filled in from the trajectory, not asked
+# for here.
+REME_SUCCESS_SI = """
+You are an expert in web navigation performing **success pattern recognition** for an
+experience library. You will be given a user query and the trajectory of an agent that
+**successfully accomplished the task**.
+
+## Guidelines
+Distill the reusable principle that made this work, and state explicitly WHEN a future agent
+should reach for it. The "when to use" line is what a future agent searches on, so write it as
+a description of the *situation*, not of this particular task.
+
+## Important notes
+  - You can extract *at most 3* experiences.
+  - Do not repeat similar or overlapping experiences.
+  - Do not embed specific product names, queries, or literal string contents from the task.
+  - Keywords: 2-5 short terms. Confidence: high, medium, or low.
+
+## Output Format
+Your output must strictly follow this format, one experience per block, separated by a blank line:
+
+# Experience 1
+## When to use <one sentence describing the situation this applies to>
+## Content <1-3 sentences: the reusable strategy>
+## Keywords <comma-separated terms>
+## Confidence <high|medium|low>
+"""
+
+REME_FAILURE_SI = """
+You are an expert in web navigation performing **failure analysis** for an experience library.
+You will be given a user query and the trajectory of an agent that **attempted the task but
+failed**.
+
+## Guidelines
+Name the pitfall and the corrective behaviour, and state explicitly WHEN a future agent should
+watch for it. The "when to use" line is what a future agent searches on, so write it as a
+description of the *situation*, not of this particular task.
+
+## Important notes
+  - You can extract *at most 3* experiences.
+  - Do not repeat similar or overlapping experiences.
+  - Do not embed specific product names, queries, or literal string contents from the task.
+  - Keywords: 2-5 short terms. Confidence: high, medium, or low.
+
+## Output Format
+Your output must strictly follow this format, one experience per block, separated by a blank line:
+
+# Experience 1
+## When to use <one sentence describing the situation this applies to>
+## Content <1-3 sentences: the pitfall and what to do instead>
+## Keywords <comma-separated terms>
+## Confidence <high|medium|low>
+"""
+
+REME_COMPARATIVE_SI = """
+You are an expert in web navigation performing **comparative analysis** for an experience
+library. You will be given one user query solved SUCCESSFULLY and a second, closely related
+query where the agent FAILED, each with its trajectory.
+
+## Guidelines
+Identify what the successful trajectory did differently -- the decisive divergence, not a
+summary of either run. State explicitly WHEN a future agent should apply that difference.
+
+## Important notes
+  - You can extract *at most 2* experiences.
+  - Only report differences that plausibly explain the outcome gap.
+  - Do not embed specific product names, queries, or literal string contents from the tasks.
+  - Keywords: 2-5 short terms. Confidence: high, medium, or low.
+
+## Output Format
+Your output must strictly follow this format, one experience per block, separated by a blank line:
+
+# Experience 1
+## When to use <one sentence describing the situation this applies to>
+## Content <1-3 sentences: the decisive difference and how to act on it>
+## Keywords <comma-separated terms>
+## Confidence <high|medium|low>
+"""
+
+
+# --- Memp (Exploring Agent Procedural Memory; Findings of ACL 2026) ---------------------
+# Reimplementation, not an import of Zjunlp/MemP: the released code targets ALFWorld and
+# TravelPlanner episodes (its own env wrappers + ReAct loop). Ported here are the two axes the
+# paper actually ablates and that our pipeline can express: memory BUILD (script /
+# trajectory / proceduralization, 4.2) and memory UPDATE (vanilla / validation / adjustment,
+# 4.3). The paper's Facts and AveFact retrieval keys are not ported -- see comparisons/README.md.
+MEMP_BUILD_SI = """
+You are an expert in web navigation building a **procedural memory** entry. You will be given a
+user query and the trajectory of an agent that completed it.
+
+## Guidelines
+Write the generalized procedure this trajectory instantiates: the ordered steps a future agent
+should follow for this class of task. Replace task-specific literals with placeholders such as
+{item-name} or {category}.
+
+## Important notes
+  - One procedure only, 3-8 steps.
+  - Steps must be executable web actions (navigate, search, filter, click, read, compare), not
+    narration of this one run.
+  - Keep it short enough to stay useful when injected verbatim into a prompt.
+
+## Output Format
+Your output must strictly follow this format:
+
+# Procedure
+## When to use <one sentence describing the class of task this applies to>
+## Steps
+1. <step>
+2. <step>
+"""
+
+MEMP_ADJUST_SI = """
+You are an expert in web navigation **revising a procedural memory** entry (Memp's
+"Adjustment" update strategy). You will be given an existing procedure, a user query, and the
+trajectory of an agent that followed that procedure and **failed**.
+
+## Guidelines
+Rewrite the procedure in place so the same failure would not recur. Keep what still works;
+change only what the failed trajectory shows to be wrong or missing.
+
+## Important notes
+  - Return the FULL revised procedure, not a diff.
+  - Keep the same format and the 3-8 step budget.
+  - Do not embed specific product names, queries, or literal string contents from the task.
+
+## Output Format
+Your output must strictly follow this format:
+
+# Procedure
+## When to use <one sentence describing the class of task this applies to>
+## Steps
+1. <step>
+2. <step>
+"""

@@ -53,6 +53,14 @@ from efm.forget import forget as efm_forget_fn
 from efm.usage import record_usage as efm_record_usage
 from efm.parse import parse_memory_items as efm_parse_memory_items, format_item_for_prompt as efm_format_item
 from ace.playbook import load_playbook as ace_load_playbook, save_playbook as ace_save_playbook, format_playbook_for_prompt
+from reme import experience as reme_store
+from reme.retrieve import retrieve as reme_retrieve
+from reme.extract import parse_experiences as reme_parse, format_item_for_prompt as reme_format_item
+from reme.utility import credit_outcome as reme_credit, prune as reme_prune
+from reme.compare import find_counterpart as reme_find_counterpart, comparative_extract as reme_comparative
+from memp import procedure as memp_store
+from memp.retrieve import retrieve as memp_retrieve
+from memp.update import apply_update as memp_apply_update
 from ace.curate import parse_candidate_bullets as ace_parse_candidate_bullets, curate as ace_curate
 
 SCHEMA_VERSION = 1
@@ -306,6 +314,8 @@ def process_task(
     scaling_k: int = 1,
     efm_ctx: dict | None = None,
     ace_ctx: dict | None = None,
+    reme_ctx: dict | None = None,
+    memp_ctx: dict | None = None,
 ) -> dict:
     annotation_id = row["annotation_id"]
     website = row["website"]
@@ -363,6 +373,44 @@ def process_task(
             system_prompt = SYSTEM_PROMPT + "\n\n" + block
         ace_playbook_size = len(ace_ctx["playbook"])
 
+    reme_injected: list[tuple[str, dict]] = []
+    if reme_ctx is not None:
+        try:
+            reme_injected = reme_retrieve(
+                query=confirmed_task, task_id=annotation_id, items=reme_ctx["items"],
+                now=reme_ctx["now"], top_k=reme_ctx["top_k"],
+                scenario_cache_path=str(reme_ctx["scenario_cache_path"]),
+                query_cache_path=str(reme_ctx["query_cache_path"]),
+            )
+            if reme_injected:
+                mem_items = [reme_format_item(n, item)
+                             for n, (_iid, item) in enumerate(reme_injected, start=1)]
+                system_prompt = (SYSTEM_PROMPT + "\n\n" + memory_lib.MEM_INSTRUCTION + "\n\n"
+                                 + "\n\n".join(mem_items))
+            reme_store.save_items(str(reme_ctx["items_path"]), reme_ctx["items"])  # persist f bumps
+        except Exception as exc:  # noqa: BLE001 - a retrieval hiccup shouldn't kill the run
+            memory_error = f"reme retrieval error: {type(exc).__name__}: {exc}"
+            print(f"  [reme] {memory_error}", flush=True)
+
+    memp_injected: list[tuple[str, dict]] = []
+    if memp_ctx is not None:
+        try:
+            memp_injected = memp_retrieve(
+                query=confirmed_task, task_id=annotation_id, procs=memp_ctx["procs"],
+                now=memp_ctx["now"], top_k=memp_ctx["top_k"],
+                key_cache_path=str(memp_ctx["key_cache_path"]),
+                query_cache_path=str(memp_ctx["query_cache_path"]),
+            )
+            if memp_injected:
+                mem_items = [memp_store.format_for_prompt(n, proc, memp_ctx["build"])
+                             for n, (_pid, proc) in enumerate(memp_injected, start=1)]
+                system_prompt = (SYSTEM_PROMPT + "\n\n" + memory_lib.MEM_INSTRUCTION + "\n\n"
+                                 + "\n\n".join(mem_items))
+            memp_store.save_procedures(str(memp_ctx["procs_path"]), memp_ctx["procs"])
+        except Exception as exc:  # noqa: BLE001 - a retrieval hiccup shouldn't kill the run
+            memory_error = f"memp retrieval error: {type(exc).__name__}: {exc}"
+            print(f"  [memp] {memory_error}", flush=True)
+
     # MaTTS parallel scaling (paper Section 3.3): k independent trajectories under the
     # same retrieved memory, at temperature 0.7 (matching the paper) so they actually
     # diverge, then an LLM Best-of-N judge picks the one to score and induce memory
@@ -404,6 +452,8 @@ def process_task(
         "memory_retrieved": [item["task_id"] for item in retrieved_memory],
         "memory_error": memory_error,
         "efm_retrieved": [iid for iid, _item in efm_injected],
+        "reme_retrieved": [iid for iid, _item in reme_injected],
+        "memp_retrieved": [pid for pid, _proc in memp_injected],
         "ace_playbook_size": ace_playbook_size,
         "scaling": scaling_info,
         "steps": steps_out,
@@ -483,6 +533,103 @@ def process_task(
         except Exception as exc:  # noqa: BLE001 - an induction hiccup shouldn't kill the run
             result["memory_error"] = f"ace induction error: {type(exc).__name__}: {exc}"
             print(f"  [ace] {result['memory_error']}", flush=True)
+
+    elif reme_ctx is not None and scorable_steps:
+        try:
+            # Same judge as reasoningbank/efm/ace -- ReMe changes extraction, indexing and
+            # deletion, not how success is judged.
+            judged_success, judge_raw = memory_lib.judge_success(
+                reme_ctx["model_name"], confirmed_task, steps_out)
+
+            # Utility bookkeeping first (paper 3.4): u counts only retrievals that were in
+            # play on a task the judge called a success.
+            reme_credit(reme_injected, judged_success=judged_success, now=reme_ctx["now"],
+                        events_path=str(reme_ctx["events_path"]), task_id=annotation_id)
+
+            induced_raw = memory_lib.induce_memory_for_mode(
+                "reme", reme_ctx["model_name"], confirmed_task, steps_out, judged_success,
+            )
+            parsed = reme_parse("\n\n".join(induced_raw))
+            facets = [("success" if judged_success else "failure", pz) for pz in parsed]
+
+            trajectory_text = memory_lib.format_trajectory_for_induction(confirmed_task, steps_out)
+            cur_entry = {
+                "task_id": annotation_id, "website": website, "query": confirmed_task,
+                "status": "success" if judged_success else "fail", "trajectory": trajectory_text,
+            }
+            counterpart = reme_find_counterpart(
+                str(reme_ctx["raw_path"]), website, cur_entry["status"], annotation_id)
+            if counterpart is not None:
+                comp_raw = reme_comparative(reme_ctx["client"], cur_entry, counterpart)
+                facets += [("comparative", pz) for pz in reme_parse(comp_raw)]
+
+            new_ids = []
+            for facet, parsed_item in facets:
+                iid = reme_store.next_id(reme_ctx["items"])
+                reme_ctx["items"][iid] = reme_store.new_item(
+                    parsed_item, task_id=annotation_id, status=cur_entry["status"],
+                    now=reme_ctx["now"], facet=facet,
+                )
+                # Retrieval is indexed on the usage scenario (paper 4.3), so that is what is
+                # embedded into the scenario cache.
+                efm_store.embed_and_cache(
+                    parsed_item["scenario"], str(reme_ctx["scenario_cache_path"]), iid)
+                new_ids.append(iid)
+
+            num_deleted = reme_prune(reme_ctx["items"], now=reme_ctx["now"],
+                                     events_path=str(reme_ctx["events_path"]),
+                                     alpha=reme_ctx["alpha"], beta=reme_ctx["beta"])
+            if num_deleted:
+                print(f"  [reme] deleted {num_deleted} low-utility experience(s) after task "
+                      f"{annotation_id}", flush=True)
+
+            with open(reme_ctx["raw_path"], "a", encoding="utf-8") as f:
+                f.write(json.dumps(cur_entry, ensure_ascii=False) + "\n")
+            reme_store.save_items(str(reme_ctx["items_path"]), reme_ctx["items"])
+            reme_ctx["now"] += 1
+            reme_store.save_items(str(reme_ctx["now_path"]), {"now": reme_ctx["now"]})
+
+            result["judged_success"] = judged_success
+            result["judge_raw"] = judge_raw
+            result["memory_induced"] = induced_raw
+            result["reme_stored"] = new_ids
+            result["reme_deleted"] = num_deleted
+        except Exception as exc:  # noqa: BLE001 - an induction hiccup shouldn't kill the run
+            result["memory_error"] = f"reme induction error: {type(exc).__name__}: {exc}"
+            print(f"  [reme] {result['memory_error']}", flush=True)
+
+    elif memp_ctx is not None and scorable_steps:
+        try:
+            judged_success, judge_raw = memory_lib.judge_success(
+                memp_ctx["model_name"], confirmed_task, steps_out)
+            induced_raw = memory_lib.induce_memory_for_mode(
+                "memp", memp_ctx["model_name"], confirmed_task, steps_out, judged_success,
+            )
+            parsed = memp_store.parse_procedure("\n\n".join(induced_raw))
+            trajectory_text = memory_lib.format_trajectory_for_induction(confirmed_task, steps_out)
+
+            new_pid, adjusted = memp_apply_update(
+                memp_ctx["update"], memp_ctx["procs"], parsed, judged_success=judged_success,
+                injected=memp_injected, query=confirmed_task, trajectory=trajectory_text,
+                task_id=annotation_id, now=memp_ctx["now"], client=memp_ctx["client"],
+                events_path=str(memp_ctx["events_path"]),
+            )
+            if new_pid is not None:
+                # Key=Query retrieval (paper 4.2): the source task's query is the index key.
+                efm_store.embed_and_cache(confirmed_task, str(memp_ctx["key_cache_path"]), new_pid)
+
+            memp_store.save_procedures(str(memp_ctx["procs_path"]), memp_ctx["procs"])
+            memp_ctx["now"] += 1
+            memp_store.save_procedures(str(memp_ctx["now_path"]), {"now": memp_ctx["now"]})
+
+            result["judged_success"] = judged_success
+            result["judge_raw"] = judge_raw
+            result["memory_induced"] = induced_raw
+            result["memp_appended"] = new_pid
+            result["memp_adjusted"] = adjusted
+        except Exception as exc:  # noqa: BLE001 - an induction hiccup shouldn't kill the run
+            result["memory_error"] = f"memp induction error: {type(exc).__name__}: {exc}"
+            print(f"  [memp] {result['memory_error']}", flush=True)
 
     (task_dir / "trajectory.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     write_task_report_html(task_dir, result)
@@ -689,7 +836,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--memory-mode",
         default="none",
-        choices=["none", "synapse", "awm", "reasoningbank", "ace", "efm"],
+        choices=["none", "synapse", "awm", "reasoningbank", "ace", "efm", "reme", "memp"],
         help="none (default) = actor-only baseline. synapse = store the raw successful "
              "trajectory verbatim, no distillation. awm (Agent Workflow Memory) = distill a "
              "reusable workflow from successful trajectories only. reasoningbank = distill "
@@ -699,7 +846,11 @@ def parse_args() -> argparse.Namespace:
              "of ace-agent/ace; see WebArena/NOTES.md). efm = Edit-Free Memory Lifecycle "
              "(insertion-time Duplicate/Group/Conflict/Novel classification, retrieval-time "
              "group collapse + conflict co-injection, usage-evidence-based forgetting) -- see "
-             "efm/ and root EFM_TASK.md.",
+             "efm/ and root EFM_TASK.md. reme (Remember Me, Refine Me) = multi-faceted "
+             "extraction (success/failure/comparative), retrieval indexed on each experience's "
+             "usage scenario, utility-based deletion -- see reme/. memp (Memp) = procedural "
+             "memory with BUILD/UPDATE axes, including the in-place Adjustment rewrite -- "
+             "see memp/. Both are reimplementations, not imports (see comparisons/README.md).",
     )
     parser.add_argument("--memory-dir", type=Path, default=Path("memories_reasoningbank"))
     parser.add_argument("--memory-top-n", type=int, default=3)
@@ -711,6 +862,26 @@ def parse_args() -> argparse.Namespace:
              "same-conditions comparison with the reasoningbank arm.",
     )
     parser.add_argument("--ace-max-bullets", type=int, default=20)
+    parser.add_argument(
+        "--reme-top-k",
+        type=int,
+        default=3,
+        help="reme only: experiences injected per task. Match --memory-top-n for a "
+             "same-conditions comparison with the reasoningbank arm.",
+    )
+    parser.add_argument("--reme-alpha", type=int, default=5,
+                        help="reme only: minimum retrievals before deletion is considered.")
+    parser.add_argument("--reme-beta", type=float, default=0.5,
+                        help="reme only: delete when u/f <= beta once f >= alpha.")
+    parser.add_argument("--memp-top-k", type=int, default=1,
+                        help="memp only: procedures injected per task.")
+    parser.add_argument("--memp-build", default="proceduralization",
+                        choices=["script", "trajectory", "proceduralization"],
+                        help="memp only: which BUILD condition to inject (paper 4.2).")
+    parser.add_argument("--memp-update", default="adjustment",
+                        choices=["vanilla", "validation", "adjustment"],
+                        help="memp only: which UPDATE strategy to apply (paper 4.3); "
+                             "'adjustment' rewrites the injected procedure in place on failure.")
     EFMHParams.add_cli_args(parser)
     parser.add_argument(
         "--scaling-k",
@@ -807,6 +978,53 @@ def main() -> int:
         }
         print(f"Memory mode: ace (dir={ace_dir}, max_bullets={args.ace_max_bullets})")
 
+    reme_ctx = None
+    if args.memory_mode == "reme" and not args.report_only:
+        domain_key = domain_label.lower()
+        reme_dir = args.memory_dir / domain_key
+        items_path = reme_dir / "items.json"
+        now_path = reme_dir / "now.json"
+        reme_ctx = {
+            "items": reme_store.load_items(str(items_path)),
+            "now": reme_store.load_items(str(now_path)).get("now", 0),
+            "top_k": args.reme_top_k,
+            "alpha": args.reme_alpha,
+            "beta": args.reme_beta,
+            "items_path": items_path,
+            "now_path": now_path,
+            "raw_path": reme_dir / "_raw.jsonl",
+            "scenario_cache_path": reme_dir / "scenario_embeddings.jsonl",
+            "query_cache_path": reme_dir / "query_embeddings.jsonl",
+            "events_path": reme_dir / "reme_events.jsonl",
+            "model_name": args.model,
+            "client": CLIENT_DICT[args.model](model_name=args.model),
+        }
+        print(f"Memory mode: reme (dir={reme_dir}, top_k={args.reme_top_k}, "
+              f"alpha={args.reme_alpha}, beta={args.reme_beta})")
+
+    memp_ctx = None
+    if args.memory_mode == "memp" and not args.report_only:
+        domain_key = domain_label.lower()
+        memp_dir = args.memory_dir / domain_key
+        procs_path = memp_dir / "procedures.json"
+        now_path = memp_dir / "now.json"
+        memp_ctx = {
+            "procs": memp_store.load_procedures(str(procs_path)),
+            "now": memp_store.load_procedures(str(now_path)).get("now", 0),
+            "top_k": args.memp_top_k,
+            "build": args.memp_build,
+            "update": args.memp_update,
+            "procs_path": procs_path,
+            "now_path": now_path,
+            "key_cache_path": memp_dir / "key_embeddings.jsonl",
+            "query_cache_path": memp_dir / "query_embeddings.jsonl",
+            "events_path": memp_dir / "memp_events.jsonl",
+            "model_name": args.model,
+            "client": CLIENT_DICT[args.model](model_name=args.model),
+        }
+        print(f"Memory mode: memp (dir={memp_dir}, build={args.memp_build}, "
+              f"update={args.memp_update}, top_k={args.memp_top_k})")
+
     multimodal_index = None
     if not args.no_real_screenshots and not args.report_only and (args.multimodal_dir / "train").exists():
         annotation_ids = set(manifest["annotation_ids"])
@@ -847,6 +1065,7 @@ def main() -> int:
                 result = process_task(
                     row, client, renderer, args.output_root, args.max_candidates, memory_ctx, multimodal_index,
                     scaling_k=args.scaling_k, efm_ctx=efm_ctx, ace_ctx=ace_ctx,
+                    reme_ctx=reme_ctx, memp_ctx=memp_ctx,
                 )
                 elapsed = time.monotonic() - started
                 scaling_note = ""

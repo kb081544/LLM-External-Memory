@@ -24,6 +24,7 @@ import time
 
 from prompts.memory_instruction import (
     SUCCESSFUL_SI, FAILED_SI, AWM_INSTRUCTION, AWM_EXAMPLE, ACE_REFLECTOR_SI, ACE_REFLECTOR_FI,
+    REME_SUCCESS_SI, REME_FAILURE_SI, MEMP_BUILD_SI,
 )
 from utils.clients import CLIENT_DICT
 
@@ -116,6 +117,17 @@ def get_info(f: str, status: str = None) -> dict:
 
     return wdict
 
+def _strip_fence(text: str) -> str:
+    """Models sometimes wrap a whole response in a code fence despite the prompt's format
+    block not showing one -- strip it so the per-block regexes in reme/extract.py and
+    memp/procedure.py aren't thrown off (same fix the ace branch applies inline)."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+    return text
+
+
 def main():
     # collect result directories, e.g., ["results/webarena.0", ...]
     args.result_dir = args.result_dir.split()
@@ -191,6 +203,23 @@ def main():
         if generated_memory_item.startswith("```"):
             generated_memory_item = re.sub(r"^```[a-zA-Z]*\n?", "", generated_memory_item)
             generated_memory_item = re.sub(r"\n?```$", "", generated_memory_item)
+
+    elif args.memory_mode == "reme":
+        # ReMe's per-trajectory extraction (paper 3.2): success-pattern recognition on a
+        # success, failure analysis on a failure. The third analysis (comparative) needs a
+        # success/fail PAIR and runs afterwards in pipeline_memory.py via reme/compare.py,
+        # for the same reason ACE's curation step lives outside this stateless call.
+        system_msg = REME_SUCCESS_SI if ex['status'] == 'success' else REME_FAILURE_SI
+        generated_memory_item, _ = llm_client.one_step_chat(trajectory, system_msg=system_msg, temperature=0.7)
+        generated_memory_item = _strip_fence(generated_memory_item)
+
+    elif args.memory_mode == "memp":
+        # Memp's BUILD step (paper 4.2): one generalized procedure per trajectory. Whether it
+        # is actually appended, skipped, or used to revise an existing procedure in place is
+        # the UPDATE step (memp/update.py), applied in pipeline_memory.py -- the paper treats
+        # build and update as separate axes, so they stay separate here.
+        generated_memory_item, _ = llm_client.one_step_chat(trajectory, system_msg=MEMP_BUILD_SI, temperature=0.7)
+        generated_memory_item = _strip_fence(generated_memory_item)
 
     # write memory to jsonl file 
     with open(args.output_path, 'a') as f:

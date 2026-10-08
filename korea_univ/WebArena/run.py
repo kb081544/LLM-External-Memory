@@ -191,6 +191,28 @@ def parse_args():
     )
     parser.add_argument("--ace_max_bullets", type=int, default=20)
     parser.add_argument(
+        "--reme_dir",
+        type=str,
+        default=None,
+        help="If set, retrieve ReMe experiences (reme/retrieve.py: cosine over each "
+             "experience's usage-scenario embedding) instead of the reasoningbank-style "
+             "select_memory() branch below. Injected text still lands in --memory_path, so "
+             "the agent side is byte-for-byte the same mechanism as every other arm.",
+    )
+    parser.add_argument("--reme_top_k", type=int, default=3)
+    parser.add_argument(
+        "--memp_dir",
+        type=str,
+        default=None,
+        help="If set, retrieve Memp procedures (memp/retrieve.py: cosine over the source "
+             "task query, the paper's Key=Query condition) instead of the select_memory() "
+             "branch below.",
+    )
+    parser.add_argument("--memp_top_k", type=int, default=1)
+    parser.add_argument("--memp_build", type=str, default="proceduralization",
+                        choices=["script", "trajectory", "proceduralization"],
+                        help="Which of Memp's BUILD conditions to inject (paper 4.2).")
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="DEBUG-level logging to console + experiment.log, so per-step "
@@ -261,6 +283,68 @@ def main():
                         source_task_ids.append(exp["trajectory_ref"])
                         break
             log_retrieval_event(args.usage_log_path, query_task_id=tid, retrieved_task_ids=source_task_ids)
+
+    elif args.reme_dir:
+        ensure_file(args.memory_path)
+        os.makedirs(args.reme_dir, exist_ok=True)
+
+        from reme import experience as reme_store
+        from reme.retrieve import retrieve as reme_retrieve
+        from reme.extract import format_item_for_prompt as reme_format_item
+
+        tid = args.task_name.split(".")[-1]
+        cur_query = json.load(open(f"./config_files/{tid}.json"))["intent"]
+
+        items = reme_store.load_items(f"{args.reme_dir}/items.json")
+        now = reme_store.load_items(f"{args.reme_dir}/now.json").get("now", 0) if os.path.exists(
+            f"{args.reme_dir}/now.json") else 0
+
+        injected = reme_retrieve(
+            query=cur_query, task_id=tid, items=items, now=now, top_k=args.reme_top_k,
+            scenario_cache_path=f"{args.reme_dir}/scenario_embeddings.jsonl",
+            query_cache_path=f"{args.reme_dir}/query_embeddings.jsonl",
+        )
+        reme_store.save_items(f"{args.reme_dir}/items.json", items)  # persist n_retrieved bumps
+
+        mem_items = [reme_format_item(n, item) for n, (_iid, item) in enumerate(injected, start=1)]
+        with open(args.memory_path, "w") as f:
+            f.write("\n\n".join(mem_items) + ("\n" if mem_items else ""))
+
+        # display-order ids, so the post-step in pipeline_memory.py can credit utility
+        # (ReMe's u/f) without re-deriving retrieval.
+        reme_store.save_items(f"{args.reme_dir}/last_injected.json",
+                              {"ids": [iid for iid, _item in injected]})
+
+    elif args.memp_dir:
+        ensure_file(args.memory_path)
+        os.makedirs(args.memp_dir, exist_ok=True)
+
+        from memp import procedure as memp_store
+        from memp.retrieve import retrieve as memp_retrieve
+
+        tid = args.task_name.split(".")[-1]
+        cur_query = json.load(open(f"./config_files/{tid}.json"))["intent"]
+
+        procs = memp_store.load_procedures(f"{args.memp_dir}/procedures.json")
+        now = memp_store.load_procedures(f"{args.memp_dir}/now.json").get("now", 0) if os.path.exists(
+            f"{args.memp_dir}/now.json") else 0
+
+        injected = memp_retrieve(
+            query=cur_query, task_id=tid, procs=procs, now=now, top_k=args.memp_top_k,
+            key_cache_path=f"{args.memp_dir}/key_embeddings.jsonl",
+            query_cache_path=f"{args.memp_dir}/query_embeddings.jsonl",
+        )
+        memp_store.save_procedures(f"{args.memp_dir}/procedures.json", procs)
+
+        mem_items = [
+            memp_store.format_for_prompt(n, proc, args.memp_build)
+            for n, (_pid, proc) in enumerate(injected, start=1)
+        ]
+        with open(args.memory_path, "w") as f:
+            f.write("\n\n".join(mem_items) + ("\n" if mem_items else ""))
+
+        memp_store.save_procedures(f"{args.memp_dir}/last_injected.json",
+                                   {"ids": [pid for pid, _proc in injected]})
 
     elif args.memory_path:
         ensure_file(args.memory_path)

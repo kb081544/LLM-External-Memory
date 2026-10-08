@@ -33,7 +33,7 @@ from google.genai.types import EmbedContentConfig
 
 from memory_instruction import (
     SUCCESSFUL_SI, FAILED_SI, MEM_INSTRUCTION, AWM_INSTRUCTION, AWM_EXAMPLE,
-    ACE_REFLECTOR_SI, ACE_REFLECTOR_FI,
+    ACE_REFLECTOR_SI, ACE_REFLECTOR_FI, REME_SUCCESS_SI, REME_FAILURE_SI, MEMP_BUILD_SI,
 )
 from utils.clients import CLIENT_DICT
 
@@ -205,6 +205,17 @@ def induce_memory(model_name: str, confirmed_task: str, steps: list[dict], judge
     return [block.strip() for block in text.split("\n\n") if block.strip()]
 
 
+def _strip_fence(text: str) -> str:
+    """Strip a whole-response code fence (same handling the reasoningbank/awm/ace branches
+    above apply inline), so the block regexes in reme/extract.py and memp/procedure.py see
+    clean text."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+    return text
+
+
 def induce_memory_for_mode(mode: str, model_name: str, confirmed_task: str, steps: list[dict],
                             judged_success: bool) -> list[str]:
     """Generalizes induce_memory() to the synapse/awm baselines too, mirroring WebArena's
@@ -246,6 +257,27 @@ def induce_memory_for_mode(mode: str, model_name: str, confirmed_task: str, step
             text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
             text = re.sub(r"\n?```$", "", text)
         return [block.strip() for block in text.split("\n\n") if block.strip()]
+
+    if mode == "reme":
+        # ReMe's per-trajectory extraction (paper 3.2): success-pattern recognition on a
+        # success, failure analysis on a failure. The comparative analysis needs a success/fail
+        # pair and runs separately in run.py via reme/compare.py, for the same reason ACE's
+        # curation step lives outside this stateless call.
+        trajectory = format_trajectory_for_induction(confirmed_task, steps)
+        system_msg = REME_SUCCESS_SI if judged_success else REME_FAILURE_SI
+        llm = CLIENT_DICT[model_name](model_name=model_name)
+        text, _ = llm.one_step_chat(trajectory, system_msg=system_msg, temperature=0.7)
+        return [_strip_fence(text)]
+
+    if mode == "memp":
+        # Memp's BUILD step (paper 4.2): one generalized procedure per trajectory. Whether it
+        # is appended, skipped, or used to revise an existing procedure in place is the UPDATE
+        # step (memp/update.py), applied in run.py -- the paper treats build and update as
+        # separate axes, so they stay separate here.
+        trajectory = format_trajectory_for_induction(confirmed_task, steps)
+        llm = CLIENT_DICT[model_name](model_name=model_name)
+        text, _ = llm.one_step_chat(trajectory, system_msg=MEMP_BUILD_SI, temperature=0.7)
+        return [_strip_fence(text)]
 
     raise ValueError(f"induce_memory_for_mode: unknown mode {mode!r}")
 

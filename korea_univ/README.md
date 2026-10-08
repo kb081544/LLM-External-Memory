@@ -6,22 +6,30 @@ Lifecycle)** — 삽입 시점에 설명(D)/내용(C) 임베딩 유사도로 아
 안 쓰이는 메모리를 삭제(forgetting)하는 메모리 관리 기법 — 을 구현하고 baseline(ReasoningBank의
 단순 누적 주입)과 비교하는 연구 코드입니다.
 
-**6가지 메모리 기법**을 비교합니다 — 코드는 최상위에 **방법론별로** 정리돼 있고(`no_memory/`,
-`synapse/`, `awm/`, `reasoningbank/`, `ace/`, `efm/`), 각 폴더 안에 벤치마크별 실행 스크립트가
-있습니다. 벤치마크(WebArena/Mind2Web)의 실제 코드·데이터는 각자의 폴더에 그대로 있고, 아래
-방법론 폴더들은 거기로 들어가서 올바른 플래그로 호출해주는 역할만 합니다.
+**주 비교 대상은 6가지**입니다 — `no_memory/`(하한선), `reasoningbank/`(이 논문이 바로 계승한
+baseline), `ace/`·`reme/`·`memp/`(메모리 축적이라는 같은 주제의 최근 유사 연구), `efm/`(우리
+연구). `synapse/`, `awm/`은 코드는 구현돼 있지만(`reasoningbank`가 이미 이 계보를 계승한 논문이라)
+**주 비교표에서는 제외**했습니다 — 필요하면 그대로 돌릴 수 있습니다.
+
+코드는 최상위에 **방법론별로** 정리돼 있고, 각 폴더 안에 벤치마크별 실행 스크립트가 있습니다.
+벤치마크(WebArena/Mind2Web)의 실제 코드·데이터는 각자의 폴더에 그대로 있고, 아래 방법론 폴더들은
+거기로 들어가서 올바른 플래그로 호출해주는 역할만 합니다.
 
 | 폴더 | 방식 | WebArena | Mind2Web |
 |---|---|---|---|
 | `no_memory/` | 메모리 없음(하한선) | ✅ | ✅ |
-| `synapse/` | 성공 궤적을 통째로 저장(distillation 없음) | ✅ | ✅ |
-| `awm/` (Agent Workflow Memory) | 성공 사례에서 반복 워크플로 추출 | ✅ | ✅ |
 | `reasoningbank/` | **baseline** — 성공/실패 모두 distill, 가장 가까운 experience 통째로 주입 | ✅ | ✅ |
 | `ace/` (Agentic Context Engineering) | Reflector가 bullet 추출 → helpful/harmful 투표로 playbook 진화 (재구현, `NOTES.md` 참고) | ✅ | ✅ |
+| `reme/` (Remember Me, Refine Me) | 성공/실패/비교 세 갈래 추출, usage scenario 임베딩 색인, 사용 통계 기반 삭제 (재구현) | ✅ | ✅ |
+| `memp/` (Memp) | 절차(procedure) 메모리, BUILD×UPDATE 두 축, 실패 시 절차 in-place 재작성 (재구현) | ✅ | ✅ |
 | `efm/` (Edit-Free Memory Lifecycle) | **우리 연구** — D/C 유사도 기반 분류·그룹·충돌 관리 + 사용 증거 기반 삭제 | ✅ | ✅ |
+| `synapse/` *(주 비교에서 제외)* | 성공 궤적을 통째로 저장(distillation 없음) | ✅ | ✅ |
+| `awm/` *(주 비교에서 제외)* (Agent Workflow Memory) | 성공 사례에서 반복 워크플로 추출 | ✅ | ✅ |
 
-이제 6가지 기법 전부 **두 벤치마크 모두에서** 바로 돌릴 수 있습니다(`synapse`/`awm`/`ace`의
-Mind2Web 포팅은 WebArena 쪽 프롬프트·알고리즘을 그대로 재사용 — `NOTES.md` 참고).
+8가지 기법 전부 **두 벤치마크 모두에서** 바로 돌릴 수 있습니다(모든 Mind2Web 포팅은 WebArena 쪽
+프롬프트·알고리즘을 그대로 재사용 — `NOTES.md` 참고). `ace`/`reme`/`memp`는 원 논문 코드가
+우리 벤치마크 구조(멀티스텝 브라우저 루프 / 오프라인 스텝 리플레이)에 맞지 않아 **알고리즘만
+재구현**했습니다 — 각 폴더 `README.md`와 `NOTES.md`에 재구현 범위가 적혀 있습니다.
 
 ```bash
 cd efm
