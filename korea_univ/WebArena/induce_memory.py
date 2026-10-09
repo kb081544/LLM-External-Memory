@@ -25,6 +25,7 @@ import time
 from prompts.memory_instruction import (
     SUCCESSFUL_SI, FAILED_SI, AWM_INSTRUCTION, AWM_EXAMPLE, ACE_REFLECTOR_SI, ACE_REFLECTOR_FI,
     REME_SUCCESS_SI, REME_FAILURE_SI, MEMP_BUILD_SI,
+    CER_DYNAMICS_DISTILL_SI, CER_SKILLS_DISTILL_SI,
 )
 from utils.clients import CLIENT_DICT
 
@@ -70,6 +71,54 @@ def extract_think_and_action(folder: str) -> tuple[list[str], list[str]]:
             continue
     return think_list, action_list
 
+def extract_cer_steps(folder: str, max_page_chars: int = 1500) -> list[dict]:
+    """Like extract_think_and_action, but also carries each step's URL and a bounded slice of
+    its accessibility tree. CER's dynamics module summarizes *pages* and pairs them with the
+    URL that reaches them (paper 3.1), so unlike every other arm it has to see the observation
+    and not just think/action. axtree_txt runs to tens of thousands of characters, so it is
+    truncated per step -- a page summary needs the top of the tree (title, nav, main landmarks),
+    not the whole DOM."""
+    step_files = sorted(
+        [f for f in os.listdir(folder) if re.match(r"step_\d+\.pkl\.gz", f)],
+        key=lambda f: int(re.findall(r"\d+", f)[0])
+    )
+    steps = []
+    for f in step_files:
+        try:
+            with gzip.open(os.path.join(folder, f), 'rb') as fh:
+                data = pickle.load(fh)
+            ai = data.agent_info
+            action = ai.get("action", "")
+            if not action:  # same skip rule as extract_think_and_action
+                continue
+            obs = data.obs if isinstance(data.obs, dict) else {}
+            page = (obs.get("axtree_txt") or "")[:max_page_chars]
+            steps.append({
+                "url": obs.get("url", ""),
+                "page": page,
+                "think": _extract_think_from_output(ai),
+                "action": action,
+            })
+        except Exception:
+            continue
+    return steps
+
+
+def format_cer_trajectory(steps: list[dict]) -> str:
+    """State-action trajectory in the shape CER's distillation prompts describe: each step
+    shows where the agent was, what it saw, what it thought and what it did."""
+    out = []
+    for i, s in enumerate(steps, 1):
+        out.append(
+            f"Step {i}\n"
+            f"URL: {s['url']}\n"
+            f"Observation (truncated):\n{s['page']}\n"
+            f"<think>\n{s['think']}\n</think>\n"
+            f"<action>\n{s['action']}\n</action>"
+        )
+    return "\n\n".join(out)
+
+
 def format_trajectory(think_list: list[str], action_list: list[list[str]]) -> str:
     trajectory = []
     for t, a in zip(think_list, action_list):
@@ -110,10 +159,11 @@ def get_info(f: str, status: str = None) -> dict:
     think_list, action_list = extract_think_and_action(f)
 
     # add to template dict
+    sites = ", ".join(config.get("sites", []))
     if status == 'success':
-        wdict = {"query": query, "template_id": template_id, "think_list": think_list, "action_list": action_list, "status": "success"}
+        wdict = {"query": query, "template_id": template_id, "think_list": think_list, "action_list": action_list, "status": "success", "sites": sites}
     elif status == 'fail':
-        wdict = {"query": query, "template_id": template_id, "think_list": think_list, "action_list": action_list, "status": "fail"}
+        wdict = {"query": query, "template_id": template_id, "think_list": think_list, "action_list": action_list, "status": "fail", "sites": sites}
 
     return wdict
 
@@ -170,6 +220,8 @@ def main():
         except Exception:
             pass
 
+    extra: dict = {}  # per-mode fields added to the output record (cer writes two raw blocks)
+
     if args.memory_mode == "reasoningbank":
         if autoeval_thoughts:
             status_label = "succeeded" if ex['status'] == 'success' else "failed"
@@ -221,17 +273,60 @@ def main():
         generated_memory_item, _ = llm_client.one_step_chat(trajectory, system_msg=MEMP_BUILD_SI, temperature=0.7)
         generated_memory_item = _strip_fence(generated_memory_item)
 
-    # write memory to jsonl file 
+    elif args.memory_mode == "cer":
+        # CER's two distillation modules (paper 3.1): dynamics (pages + URLs) and skills
+        # (sub-goal procedures), each its own call with its own prompt. Both run on successes
+        # *and* failures -- the paper's main setting distills from both, and filtering to
+        # successes is the separate CER_success ablation (5.6).
+        # The buffer's current contents go into each prompt so the model can answer
+        # "Summarized before" instead of re-distilling what is already stored (its own dedup
+        # mechanism, prompt notes in Fig. 3/4). Parsing and merging happen in
+        # pipeline_memory.py via cer/distill.py, which owns the persistent buffer -- same
+        # split as ace/reme/memp above.
+        from cer.buffer import load_buffer, format_existing_dynamics, format_existing_skills
+
+        buf = load_buffer(os.path.join(args.cer_dir, "buffer.json")) if args.cer_dir else {"dynamics": {}, "skills": {}}
+        cer_steps = extract_cer_steps(cur_task, max_page_chars=args.cer_page_chars)
+        cer_trajectory = format_cer_trajectory(cer_steps)
+        website = ex.get("sites") or "unknown"
+
+        dyn_prompt = (
+            f"Overall goal of the trajectory: {ex['query']}\n"
+            f"Current website: {website}\n"
+            f"Existing summarized pages:\n{format_existing_dynamics(buf)}\n"
+            f"Human user trajectory:\n{cer_trajectory}"
+        )
+        cer_dynamics_raw, _ = llm_client.one_step_chat(
+            dyn_prompt, system_msg=CER_DYNAMICS_DISTILL_SI, temperature=0.1)
+
+        skills_prompt = (
+            f"Overall goal: {ex['query']}\n"
+            f"Current website: {website}\n"
+            f"Existing skills:\n{format_existing_skills(buf)}\n"
+            f"Human user trajectory:\n{cer_trajectory}"
+        )
+        cer_skills_raw, _ = llm_client.one_step_chat(
+            skills_prompt, system_msg=CER_SKILLS_DISTILL_SI, temperature=0.1)
+
+        extra = {
+            "cer_dynamics_raw": _strip_fence(cer_dynamics_raw or ""),
+            "cer_skills_raw": _strip_fence(cer_skills_raw or ""),
+        }
+        generated_memory_item = ""
+
+    # write memory to jsonl file
+    record = {
+        "task_id": args.task.split(".")[-1],
+        "query": ex["query"],
+        "think_list": ex["think_list"],
+        "action_list": ex["action_list"],
+        "status": ex["status"],
+        "memory_items": generated_memory_item.split("\n\n"),
+        "template_id": ex["template_id"]
+    }
+    record.update(extra)
     with open(args.output_path, 'a') as f:
-        f.write(json.dumps({
-            "task_id": args.task.split(".")[-1],
-            "query": ex["query"],
-            "think_list": ex["think_list"],
-            "action_list": ex["action_list"],
-            "status": ex["status"],
-            "memory_items": generated_memory_item.split("\n\n"),
-            "template_id": ex["template_id"]
-        }) + '\n')
+        f.write(json.dumps(record) + '\n')
 
 
 if __name__ == "__main__":
@@ -245,6 +340,13 @@ if __name__ == "__main__":
                         choices=["gpt-3.5", "gpt-4", "gpt-4o", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "agy-claude-sonnet-4-6", "ccli-sonnet"])
     parser.add_argument("--task", type=str, default="webarena.47")
     parser.add_argument("--memory_mode", type=str, default="reasoningbank")
+    parser.add_argument("--cer_dir", type=str, default=None,
+                        help="cer only: buffer directory, so the distillation prompts can be "
+                             "shown what is already stored and answer 'Summarized before'.")
+    parser.add_argument("--cer_page_chars", type=int, default=1500,
+                        help="cer only: per-step accessibility-tree slice given to the dynamics "
+                             "module. CER is the one arm that must see page content, not just "
+                             "think/action.")
     args = parser.parse_args()
 
     main()

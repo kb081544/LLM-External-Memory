@@ -61,6 +61,9 @@ from reme.compare import find_counterpart as reme_find_counterpart, comparative_
 from memp import procedure as memp_store
 from memp.retrieve import retrieve as memp_retrieve
 from memp.update import apply_update as memp_apply_update
+from cer import buffer as cer_buffer
+from cer.retrieve import retrieve as cer_retrieve
+from cer.distill import parse_skills as cer_parse_skills, merge_skills as cer_merge_skills
 from ace.curate import parse_candidate_bullets as ace_parse_candidate_bullets, curate as ace_curate
 
 SCHEMA_VERSION = 1
@@ -316,6 +319,7 @@ def process_task(
     ace_ctx: dict | None = None,
     reme_ctx: dict | None = None,
     memp_ctx: dict | None = None,
+    cer_ctx: dict | None = None,
 ) -> dict:
     annotation_id = row["annotation_id"]
     website = row["website"]
@@ -410,6 +414,22 @@ def process_task(
         except Exception as exc:  # noqa: BLE001 - a retrieval hiccup shouldn't kill the run
             memory_error = f"memp retrieval error: {type(exc).__name__}: {exc}"
             print(f"  [memp] {memory_error}", flush=True)
+
+    cer_injected: list[dict] = []
+    if cer_ctx is not None:
+        try:
+            # LLM-selected top-k out of the whole buffer (paper 3.2), not embedding similarity.
+            cer_injected = cer_retrieve(
+                goal=confirmed_task, website=website, buf=cer_ctx["buffer"],
+                client=cer_ctx["client"], max_skills=cer_ctx["max_skills"],
+            )
+            block = cer_buffer.render_for_replay([], cer_injected, memory_lib.CER_REPLAY_INSTRUCTION)
+            if block:
+                system_prompt = SYSTEM_PROMPT + "\n\n" + block
+            cer_buffer.save_buffer(str(cer_ctx["buffer_path"]), cer_ctx["buffer"])
+        except Exception as exc:  # noqa: BLE001 - a retrieval hiccup shouldn't kill the run
+            memory_error = f"cer retrieval error: {type(exc).__name__}: {exc}"
+            print(f"  [cer] {memory_error}", flush=True)
 
     # MaTTS parallel scaling (paper Section 3.3): k independent trajectories under the
     # same retrieved memory, at temperature 0.7 (matching the paper) so they actually
@@ -631,6 +651,30 @@ def process_task(
             result["memory_error"] = f"memp induction error: {type(exc).__name__}: {exc}"
             print(f"  [memp] {result['memory_error']}", flush=True)
 
+    elif cer_ctx is not None and scorable_steps:
+        try:
+            judged_success, judge_raw = memory_lib.judge_success(
+                cer_ctx["model_name"], confirmed_task, steps_out)
+            # Distils on success and failure alike -- the paper's main setting (5.6).
+            induced_raw = memory_lib.induce_memory_for_mode(
+                "cer", cer_ctx["model_name"], confirmed_task, steps_out, judged_success,
+                existing=cer_buffer.format_existing_skills(cer_ctx["buffer"]), website=website,
+            )
+            buf = cer_ctx["buffer"]
+            now = len(buf["skills"])  # monotone counter, provenance only
+            added = cer_merge_skills(
+                cer_parse_skills("\n\n".join(induced_raw)), buf, annotation_id, now)
+            cer_buffer.save_buffer(str(cer_ctx["buffer_path"]), buf)
+
+            result["judged_success"] = judged_success
+            result["judge_raw"] = judge_raw
+            result["memory_induced"] = induced_raw
+            result["cer_added_skills"] = added
+            result["cer_buffer_size"] = len(buf["skills"])
+        except Exception as exc:  # noqa: BLE001 - an induction hiccup shouldn't kill the run
+            result["memory_error"] = f"cer induction error: {type(exc).__name__}: {exc}"
+            print(f"  [cer] {result['memory_error']}", flush=True)
+
     (task_dir / "trajectory.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     write_task_report_html(task_dir, result)
     return result
@@ -836,7 +880,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--memory-mode",
         default="none",
-        choices=["none", "synapse", "awm", "reasoningbank", "ace", "efm", "reme", "memp"],
+        choices=["none", "synapse", "awm", "reasoningbank", "ace", "efm", "reme", "memp", "cer"],
         help="none (default) = actor-only baseline. synapse = store the raw successful "
              "trajectory verbatim, no distillation. awm (Agent Workflow Memory) = distill a "
              "reusable workflow from successful trajectories only. reasoningbank = distill "
@@ -882,6 +926,10 @@ def parse_args() -> argparse.Namespace:
                         choices=["vanilla", "validation", "adjustment"],
                         help="memp only: which UPDATE strategy to apply (paper 4.3); "
                              "'adjustment' rewrites the injected procedure in place on failure.")
+    parser.add_argument("--cer-max-skills", type=int, default=5,
+                        help="cer only: k_s, max skills replayed per task (paper 4.1.1 uses 5). "
+                             "There is no k_d here: Mind2Web's offline steps carry no URL, so "
+                             "this arm is the paper's 'CER - dynamics' variant (5.7).")
     EFMHParams.add_cli_args(parser)
     parser.add_argument(
         "--scaling-k",
@@ -1025,6 +1073,21 @@ def main() -> int:
         print(f"Memory mode: memp (dir={memp_dir}, build={args.memp_build}, "
               f"update={args.memp_update}, top_k={args.memp_top_k})")
 
+    cer_ctx = None
+    if args.memory_mode == "cer" and not args.report_only:
+        domain_key = domain_label.lower()
+        cer_dir = args.memory_dir / domain_key
+        buffer_path = cer_dir / "buffer.json"
+        cer_ctx = {
+            "buffer": cer_buffer.load_buffer(str(buffer_path)),
+            "buffer_path": buffer_path,
+            "max_skills": args.cer_max_skills,
+            "model_name": args.model,
+            "client": CLIENT_DICT[args.model](model_name=args.model),
+        }
+        print(f"Memory mode: cer (dir={cer_dir}, max_skills={args.cer_max_skills}, "
+              f"skills-only: the paper's 'CER - dynamics' variant, since Mind2Web steps carry no URL)")
+
     multimodal_index = None
     if not args.no_real_screenshots and not args.report_only and (args.multimodal_dir / "train").exists():
         annotation_ids = set(manifest["annotation_ids"])
@@ -1065,7 +1128,7 @@ def main() -> int:
                 result = process_task(
                     row, client, renderer, args.output_root, args.max_candidates, memory_ctx, multimodal_index,
                     scaling_k=args.scaling_k, efm_ctx=efm_ctx, ace_ctx=ace_ctx,
-                    reme_ctx=reme_ctx, memp_ctx=memp_ctx,
+                    reme_ctx=reme_ctx, memp_ctx=memp_ctx, cer_ctx=cer_ctx,
                 )
                 elapsed = time.monotonic() - started
                 scaling_note = ""

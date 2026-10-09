@@ -127,6 +127,7 @@ def main():
     is_ace = args.memory_mode == "ace"
     is_reme = args.memory_mode == "reme"
     is_memp = args.memory_mode == "memp"
+    is_cer = args.memory_mode == "cer"
     prune_counter = 0
     efm_hp = EFMHParams.from_args(args) if is_efm else None
     efm_dir = f"{memory_dir}/{args.website}" if is_efm else None
@@ -136,6 +137,7 @@ def main():
     ace_cache_path = f"{ace_dir}/content_embeddings.jsonl" if is_ace else None
     reme_dir = f"{memory_dir}/{args.website}" if is_reme else None
     memp_dir = f"{memory_dir}/{args.website}" if is_memp else None
+    cer_dir = f"{memory_dir}/{args.website}" if is_cer else None
     arm_client = (
         CLIENT_DICT[args.model](model_name=args.model) if (is_reme or is_memp) else None
     )
@@ -204,6 +206,12 @@ def main():
                 "--memp_dir", memp_dir,
                 "--memp_top_k", str(args.memp_top_k),
                 "--memp_build", args.memp_build,
+            ]
+        if is_cer:
+            run_cmd += [
+                "--cer_dir", cer_dir,
+                "--cer_max_dynamics", str(args.cer_max_dynamics),
+                "--cer_max_skills", str(args.cer_max_skills),
             ]
         run_ok = False
         for attempt in range(1, args.run_retries + 2):
@@ -328,9 +336,14 @@ def main():
                 else f"{ace_dir}/_raw.jsonl" if is_ace
                 else f"{reme_dir}/_raw.jsonl" if is_reme
                 else f"{memp_dir}/_raw.jsonl" if is_memp
+                else f"{cer_dir}/_raw.jsonl" if is_cer
                 else f"{memory_dir}/{args.website}.jsonl"
             ),
         ]
+        if is_cer:
+            # The distillation prompts are shown the buffer so they can answer
+            # "Summarized before" rather than re-distilling (CER's own dedup, paper 3.1).
+            memory_cmd += ["--cer_dir", cer_dir, "--cer_page_chars", str(args.cer_page_chars)]
         returncode = run_with_idle_timeout(
             memory_cmd,
             args.output_dir,
@@ -472,6 +485,27 @@ def main():
                                                               else "no change")
             print(f"[pipeline] memp ({args.memp_update}): {action} after task {tid}.", flush=True)
 
+        elif is_cer:
+            from cer.buffer import load_buffer, save_buffer
+            from cer.distill import parse_dynamics, parse_skills, merge_dynamics, merge_skills
+
+            with open(f"{cer_dir}/_raw.jsonl", encoding="utf-8") as f:
+                raw_entry = json.loads(f.readlines()[-1])
+
+            buffer_path = f"{cer_dir}/buffer.json"
+            buf = load_buffer(buffer_path)
+            now = len(buf["dynamics"]) + len(buf["skills"])  # monotone counter, only used for provenance
+            added_d = merge_dynamics(
+                parse_dynamics(raw_entry.get("cer_dynamics_raw", "")), buf, tid, now)
+            added_s = merge_skills(
+                parse_skills(raw_entry.get("cer_skills_raw", "")), buf, tid, now)
+            save_buffer(buffer_path, buf)
+            print(
+                f"[pipeline] cer: +{len(added_d)} dynamics, +{len(added_s)} skills "
+                f"(buffer now {len(buf['dynamics'])}/{len(buf['skills'])}) after task {tid}.",
+                flush=True,
+            )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -484,7 +518,7 @@ if __name__ == "__main__":
                         choices=["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "claude-3-7-sonnet@20250219", "gemini-2.5-pro", "google/gemma-3-12b-it", "agy-claude-sonnet-4-6", "ccli-sonnet"])
     parser.add_argument("--prev_id", type=int, default=-1)
     parser.add_argument("--memory_mode", type=str, default="reasoningbank",
-                        choices=["no_memory", "reasoningbank", "awm", "synapse", "reasoningbank_pruned", "efm", "ace", "reme", "memp"])
+                        choices=["no_memory", "reasoningbank", "awm", "synapse", "reasoningbank_pruned", "efm", "ace", "reme", "memp", "cer"])
     parser.add_argument("--memory_dir", type=str, default=None,
                         help="Override the memory directory (default: memories_<memory_mode>). "
                              "Use to keep a test run's memory bank separate from the main one.")
@@ -562,6 +596,25 @@ if __name__ == "__main__":
         choices=["vanilla", "validation", "adjustment"],
         help="memp only: which UPDATE strategy to apply (paper 4.3). 'adjustment' is the one "
              "that rewrites an existing procedure in place on failure.",
+    )
+    parser.add_argument(
+        "--cer_max_dynamics",
+        type=int,
+        default=5,
+        help="cer only: k_d, max page/URL experiences replayed per task (paper 4.1.1 uses 5).",
+    )
+    parser.add_argument(
+        "--cer_max_skills",
+        type=int,
+        default=5,
+        help="cer only: k_s, max skill experiences replayed per task (paper 4.1.1 uses 5).",
+    )
+    parser.add_argument(
+        "--cer_page_chars",
+        type=int,
+        default=1500,
+        help="cer only: per-step accessibility-tree slice the dynamics distillation module "
+             "sees. CER is the one arm that summarizes pages, so it needs observations.",
     )
     EFMHParams.add_cli_args(parser)
     args = parser.parse_args()

@@ -213,6 +213,19 @@ def parse_args():
                         choices=["script", "trajectory", "proceduralization"],
                         help="Which of Memp's BUILD conditions to inject (paper 4.2).")
     parser.add_argument(
+        "--cer_dir",
+        type=str,
+        default=None,
+        help="If set, replay CER experiences (cer/retrieve.py) instead of the "
+             "select_memory() branch below. Note this arm retrieves by asking an LLM to pick "
+             "entries out of the whole buffer (paper 3.2, Fig. 5/6), not by embedding "
+             "similarity, so it costs two extra LLM calls per task.",
+    )
+    parser.add_argument("--cer_max_dynamics", type=int, default=5,
+                        help="CER's k_d (paper 4.1.1 uses 5).")
+    parser.add_argument("--cer_max_skills", type=int, default=5,
+                        help="CER's k_s (paper 4.1.1 uses 5).")
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="DEBUG-level logging to console + experiment.log, so per-step "
@@ -345,6 +358,33 @@ def main():
 
         memp_store.save_procedures(f"{args.memp_dir}/last_injected.json",
                                    {"ids": [pid for pid, _proc in injected]})
+
+    elif args.cer_dir:
+        ensure_file(args.memory_path)
+        os.makedirs(args.cer_dir, exist_ok=True)
+
+        from utils.clients import CLIENT_DICT
+        from cer.buffer import load_buffer, save_buffer, render_for_replay
+        from cer.retrieve import retrieve as cer_retrieve
+        from prompts.memory_instruction import CER_REPLAY_INSTRUCTION
+
+        tid = args.task_name.split(".")[-1]
+        config = json.load(open(f"./config_files/{tid}.json"))
+        cur_query = config["intent"]
+        website = ", ".join(config.get("sites", [])) or "unknown"
+
+        buffer_path = f"{args.cer_dir}/buffer.json"
+        buf = load_buffer(buffer_path)
+        dynamics, skills = cer_retrieve(
+            goal=cur_query, website=website, buf=buf,
+            client=CLIENT_DICT[args.model_name](model_name=args.model_name),
+            max_dynamics=args.cer_max_dynamics, max_skills=args.cer_max_skills,
+        )
+        save_buffer(buffer_path, buf)  # persist n_retrieved bumps
+
+        block = render_for_replay(dynamics, skills, CER_REPLAY_INSTRUCTION)
+        with open(args.memory_path, "w") as f:
+            f.write(block + ("\n" if block else ""))
 
     elif args.memory_path:
         ensure_file(args.memory_path)

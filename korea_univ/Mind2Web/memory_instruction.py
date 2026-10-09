@@ -292,3 +292,103 @@ Your output must strictly follow this format:
 1. <step>
 2. <step>
 """
+
+
+# --- CER (Contextual Experience Replay; arXiv:2506.06698, ACL 2025) --------------------
+# Copied verbatim from WebArena/prompts/memory_instruction.py (itself transcribed from the
+# paper's Appendix A.1), same reasoning as the other prompt copies in this file.
+#
+# Only the *skills* modules are copied. CER's other half, dynamics, pairs a page summary with
+# the URL that reaches it -- and Mind2Web is an offline replay of already-captured steps that
+# carry no URL and no navigable state (see this repo's CLAUDE.md), so there is nothing for a
+# dynamics experience to point at. Skills-only is exactly the paper's own "CER - dynamics"
+# ablation (5.7, 35.1 SR on the Forum split vs 37.7 for full CER), so this is a documented
+# variant of CER rather than an invention of ours. The WebArena arm runs full CER.
+#
+# Also copied: the WebArena side's fix for a real refusal (see that file's comment above
+# CER_DYNAMICS_DISTILL_SI) -- the paper's own "<<think>>\\nthink step by step\\n<</think>>"
+# scratch-reasoning block is deterministically refused on this backbone (ccli-sonnet), so it is
+# dropped from both the format spec and the worked examples below. Nothing parsed from the
+# output depends on it.
+
+CER_SKILLS_DISTILL_SI = """
+You will be given the state-action trajectory of a user interacting with a webpage and the overall goal of the trajectory.
+You need to summarize skills from the trajectory.
+Skills are a subset of actions that the user takes to achieve a sub-goal.
+You should break the overall goal into sub-goals and summarize each sub-goal as a skill.
+Represent the non-fixed elements (input text, button strings) and non-fixed words (e.g. a specific forum name / user name; an option) with descriptive variable names as shown in the example.
+Output format:
+<<skill>>
+skill1 name here.
+<</skill>>
+<<steps>>
+The steps of the skill1 here.
+<</steps>>
+<<skill>>
+skill2 name here.
+<</skill>>
+<<steps>>
+The steps of the skill2 here.
+<</steps>>
+...
+# Examples
+## Example 1
+Overall goal: I want to get the cheapest product in the Cabinets, Racks & Shelves category
+Current website: current website
+Existing skills:
+Skill 1: Sort products by sort criterion
+1. To sort the products by sort criterion, I need to click on the "Sort by" dropdown menu.
+```click(sort by id)```
+2. To sort the products by sort criterion, I need to select the sort criterion option from the "Sort by" dropdown menu.
+```click(sort criterion id)```
+Human user trajectory: [neglected here for length]
+##Output: [neglected here for length]
+IMPORTANT NOTES you should absolutely follow:
+1. DO NOT include any other words except skills and steps as the format stated above.
+2. Check existing skills before generating; do not summarize skills that have already been summarized; instead, use "Summarized before" in the steps.
+3. You should break the overall goal into sub-goals and summarize each sub-goal as a skill.
+"""
+
+CER_SKILLS_RETRIEVE_SI = """
+You will be given a goal of a task to be executed on a website and a list of skills to choose from.
+You need to select the skills that can help most in achieving the goal.
+You should break the task down into a few steps so that you can select the skills that can help most in each step.
+IMPORTANT: You should select not more than {max_n} skills!
+Output format:
+<<selected-skills>>
+id: the id number (the number at the beginning) of skill 1; name: skill 1 name
+id: the id number (the number at the beginning) of skill 2; name: skill 2 name
+...
+<</selected-skills>>
+# Examples
+## Example 1
+Task goal: Upvote the hottest post in r/books
+Current website: website descriptions
+Skills to choose from:
+Skill 1: Navigate to forums
+1. Click on the "Forums" menu item.
+```click(forums id)```
+2. Click on the specific forum name.
+```click(forum name id)```
+Skill 2: Submit a new post
+1. Type the post title in the title text box.
+```type(title text box id, "Post Title")```
+2. Type the post content in the content text box.
+```type(content text box id, "Post Content")```
+3. Click on the "Submit" button.
+```click(submit button id)```
+Skill 3: Sort posts by sort criterion
+1. Click on the "Sort by" dropdown menu.
+```click(sort by dropdown id)```
+2. Select the sort criterion option from the "Sort by" dropdown menu.
+```click(sort criterion id)```
+Output:
+<<selected-skills>>
+id: 1; name: Navigate to forums
+id: 3; name: Sort posts by hotness
+<</selected-skills>>
+Notes:
+1. Some skills might not be consistent with the current task but it is still useful to refer to, e.g. write a post to express happiness is useful in a task to write a post to express sadness.
+"""
+
+CER_REPLAY_INSTRUCTION = 'Below are experiences replayed from past interactions with this environment that may be helpful for the current task. The pages tell you what key pages contain and how to reach them directly by URL; the skills give step-by-step patterns that worked before. Use them when relevant, and ignore them when they do not apply.'

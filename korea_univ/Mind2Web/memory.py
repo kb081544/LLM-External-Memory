@@ -34,6 +34,7 @@ from google.genai.types import EmbedContentConfig
 from memory_instruction import (
     SUCCESSFUL_SI, FAILED_SI, MEM_INSTRUCTION, AWM_INSTRUCTION, AWM_EXAMPLE,
     ACE_REFLECTOR_SI, ACE_REFLECTOR_FI, REME_SUCCESS_SI, REME_FAILURE_SI, MEMP_BUILD_SI,
+    CER_SKILLS_DISTILL_SI, CER_REPLAY_INSTRUCTION,
 )
 from utils.clients import CLIENT_DICT
 
@@ -217,12 +218,15 @@ def _strip_fence(text: str) -> str:
 
 
 def induce_memory_for_mode(mode: str, model_name: str, confirmed_task: str, steps: list[dict],
-                            judged_success: bool) -> list[str]:
+                            judged_success: bool, existing: str = "", website: str = "") -> list[str]:
     """Generalizes induce_memory() to the synapse/awm baselines too, mirroring WebArena's
     induce_memory.py --memory_mode branches exactly (same gating: synapse/awm only produce
     something on success; reasoningbank runs on both). `judged_success` -- not ground truth --
     gates these the same way it already gates SUCCESSFUL_SI/FAILED_SI above, for the reason in
-    this module's docstring."""
+    this module's docstring.
+
+    `existing` and `website` are only read by the cer branch, whose prompt is shown the buffer's
+    current contents so it can skip what it already distilled."""
     if mode == "reasoningbank":
         return induce_memory(model_name, confirmed_task, steps, judged_success)
 
@@ -277,6 +281,26 @@ def induce_memory_for_mode(mode: str, model_name: str, confirmed_task: str, step
         trajectory = format_trajectory_for_induction(confirmed_task, steps)
         llm = CLIENT_DICT[model_name](model_name=model_name)
         text, _ = llm.one_step_chat(trajectory, system_msg=MEMP_BUILD_SI, temperature=0.7)
+        return [_strip_fence(text)]
+
+    if mode == "cer":
+        # CER's skills distillation module (paper 3.1). Runs on successes *and* failures: the
+        # paper's main setting distills from both, and filtering to successes is its separate
+        # CER_success ablation (5.6). `existing` is the buffer's current skills, which the
+        # prompt needs so the model can answer "Summarized before" instead of re-distilling
+        # (CER's own dedup). Parsing and merging happen in run.py via cer/distill.py, which
+        # owns the buffer -- same split as ace/reme/memp above.
+        # No dynamics module here: Mind2Web's offline steps carry no URL, so this arm is the
+        # paper's "CER - dynamics" variant (5.7). See memory_instruction.py's CER section.
+        trajectory = format_trajectory_for_induction(confirmed_task, steps)
+        prompt = (
+            f"Overall goal: {confirmed_task}\n"
+            f"Current website: {website or 'unknown'}\n"
+            f"Existing skills:\n{existing or '(none yet)'}\n"
+            f"Human user trajectory:\n{trajectory}"
+        )
+        llm = CLIENT_DICT[model_name](model_name=model_name)
+        text, _ = llm.one_step_chat(prompt, system_msg=CER_SKILLS_DISTILL_SI, temperature=0.1)
         return [_strip_fence(text)]
 
     raise ValueError(f"induce_memory_for_mode: unknown mode {mode!r}")

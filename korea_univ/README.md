@@ -6,10 +6,11 @@ Lifecycle)** — 삽입 시점에 설명(D)/내용(C) 임베딩 유사도로 아
 안 쓰이는 메모리를 삭제(forgetting)하는 메모리 관리 기법 — 을 구현하고 baseline(ReasoningBank의
 단순 누적 주입)과 비교하는 연구 코드입니다.
 
-**주 비교 대상은 6가지**입니다 — `no_memory/`(하한선), `reasoningbank/`(이 논문이 바로 계승한
-baseline), `ace/`·`reme/`·`memp/`(메모리 축적이라는 같은 주제의 최근 유사 연구), `efm/`(우리
-연구). `synapse/`, `awm/`은 코드는 구현돼 있지만(`reasoningbank`가 이미 이 계보를 계승한 논문이라)
-**주 비교표에서는 제외**했습니다 — 필요하면 그대로 돌릴 수 있습니다.
+**주 비교 대상은 7가지**입니다 — `no_memory/`(하한선), `reasoningbank/`(이 논문이 바로 계승한
+baseline), `ace/`·`reme/`·`memp/`·`cer/`(메모리 축적이라는 같은 주제의 최근 유사 연구), `efm/`
+(우리 연구). `awm/`은 코드는 구현돼 있지만(`reasoningbank`가 이미 이 계보를 계승한 논문이라)
+**주 비교표에서는 제외**했습니다 — 필요하면 그대로 돌릴 수 있습니다. `synapse/`는 같은 이유로
+완전히 제외(폴더 삭제)했습니다.
 
 코드는 최상위에 **방법론별로** 정리돼 있고, 각 폴더 안에 벤치마크별 실행 스크립트가 있습니다.
 벤치마크(WebArena/Mind2Web)의 실제 코드·데이터는 각자의 폴더에 그대로 있고, 아래 방법론 폴더들은
@@ -22,14 +23,15 @@ baseline), `ace/`·`reme/`·`memp/`(메모리 축적이라는 같은 주제의 �
 | `ace/` (Agentic Context Engineering) | Reflector가 bullet 추출 → helpful/harmful 투표로 playbook 진화 (재구현, `NOTES.md` 참고) | ✅ | ✅ |
 | `reme/` (Remember Me, Refine Me) | 성공/실패/비교 세 갈래 추출, usage scenario 임베딩 색인, 사용 통계 기반 삭제 (재구현) | ✅ | ✅ |
 | `memp/` (Memp) | 절차(procedure) 메모리, BUILD×UPDATE 두 축, 실패 시 절차 in-place 재작성 (재구현) | ✅ | ✅ |
+| `cer/` (Contextual Experience Replay) | dynamics(페이지+URL)/skills(절차) 2종 분리 추출, 검색은 LLM이 버퍼 전체에서 top-k 직접 선택 (재구현, 공개 코드 없음 — 부록 프롬프트 기반) | ✅ (전체) | ✅ (skills만, §5.7 ablation과 동일) |
 | `efm/` (Edit-Free Memory Lifecycle) | **우리 연구** — D/C 유사도 기반 분류·그룹·충돌 관리 + 사용 증거 기반 삭제 | ✅ | ✅ |
-| `synapse/` *(주 비교에서 제외)* | 성공 궤적을 통째로 저장(distillation 없음) | ✅ | ✅ |
 | `awm/` *(주 비교에서 제외)* (Agent Workflow Memory) | 성공 사례에서 반복 워크플로 추출 | ✅ | ✅ |
 
 8가지 기법 전부 **두 벤치마크 모두에서** 바로 돌릴 수 있습니다(모든 Mind2Web 포팅은 WebArena 쪽
-프롬프트·알고리즘을 그대로 재사용 — `NOTES.md` 참고). `ace`/`reme`/`memp`는 원 논문 코드가
-우리 벤치마크 구조(멀티스텝 브라우저 루프 / 오프라인 스텝 리플레이)에 맞지 않아 **알고리즘만
-재구현**했습니다 — 각 폴더 `README.md`와 `NOTES.md`에 재구현 범위가 적혀 있습니다.
+프롬프트·알고리즘을 그대로 재사용 — `NOTES.md` 참고). `ace`/`reme`/`memp`/`cer`는 원 논문 코드가
+우리 벤치마크 구조(멀티스텝 브라우저 루프 / 오프라인 스텝 리플레이)에 맞지 않거나(`cer`는 공개
+코드 자체가 없음) **알고리즘만 재구현**했습니다 — 각 폴더 `README.md`와 `NOTES.md`에 재구현
+범위가 적혀 있습니다.
 
 ```bash
 cd efm
@@ -74,10 +76,11 @@ uv sync
 # 임베딩(검색 유사도 계산용, gemini-embedding-001) — 무료 티어 쿼터 있음(분당 100회, 일일 1000회)
 export GOOGLE_API_KEY="..."
 
-# WebArena 자체의 ground-truth 평가기(llm_fuzzy_match/llm_ua_match)가 내부적으로 OpenAI를 직접 호출함
-# (--judge 설정과 무관하게 항상 필요). 로컬 Ollama로 대체 가능 — gpt-4-1106-preview 등 이름으로
-# 모델을 pull해두고 아래처럼 설정하면 무료로 돌아감.
-export OPENAI_API_KEY="아무-더미-값"
+# WebArena 자체의 ground-truth 평가기(llm_fuzzy_match/llm_ua_match)는 원래 OpenAI를 직접
+# 호출하도록 돼 있었지만, webarena_patch.py에서 Claude CLI(ccli-sonnet, 아래 "백본 LLM" 섹션
+# 참고)로 라우팅하도록 바꿔서 이제 OPENAI_API_KEY는 필요 없습니다. 다른 백본(OpenAI API 직접
+# 호출 등)을 쓰고 싶다면 아래처럼 설정 — 로컬 Ollama로도 대체 가능.
+export OPENAI_API_KEY="아무-더미-값"  # webarena_patch.py 사용 시 불필요, 참고용으로만 남김
 export OPENAI_BASE_URL="http://localhost:11434/v1"   # Ollama 쓸 경우
 
 # WebArena 쇼핑몰/어드민/레딧 등 사이트 URL (자체 호스팅한 Docker 환경)

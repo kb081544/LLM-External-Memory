@@ -501,3 +501,195 @@ Your output must strictly follow this format:
 1. <step>
 2. <step>
 """
+
+
+# --- CER (Contextual Experience Replay; arXiv:2506.06698, ACL 2025) --------------------
+# Reimplementation, not an import: CER has no public code release. The four system messages
+# below are transcribed from the paper's Appendix A.1 (Figures 3-6) so the distillation and
+# retrieval criteria are the paper's, not ours. Two things are worth knowing when reading
+# these next to the other arms' prompts:
+#   - CER splits an experience into *dynamics* (page summary + URL + usages, Fig. 3) and
+#     *skills* (sub-goal name + step-by-step guideline with concrete action examples, Fig. 4),
+#     and distills/retrieves each with its own module (paper 3.1, 3.2).
+#   - Retrieval is an LLM *selecting* top-k entries out of the whole buffer (Fig. 5, 6), not
+#     embedding cosine similarity. That is the structural difference from reasoningbank / efm /
+#     reme, so it is kept as-is rather than swapped for our embedding retriever.
+# Deduplication is also prompt-level: the distillation prompts are shown the buffer's existing
+# entries and told to answer "Summarized before" instead of re-summarizing.
+# {max_n} stands in for the paper's k_d / k_s (both 5 in its WebArena setup, 4.1.1).
+#
+# One deliberate deviation from the paper's exact wording: the original Figures 3-6 wrap a
+# scratch-reasoning instruction in a literal "<<think>>\nthink step by step\n<</think>>" block
+# in both the output-format spec and the worked examples. On our backbone (Claude via the CLI,
+# ccli-sonnet) that combination -- a tag named "think" whose content explicitly asks for a
+# step-by-step reasoning trace -- is refused deterministically (stop_reason "refusal",
+# classifier tag "reasoning_extraction"; reproduced 8/8 across all four prompts, 0/8 once the
+# <<think>> blocks are removed -- see NOTES.md). None of the other arms' prompts contain this
+# phrasing and none hit this. The <<think>> blocks are dropped below (format-spec AND worked
+# examples, so the two stay consistent) -- they were never parsed anyway (cer/distill.py only
+# reads <<skill>>/<<steps>> and <<URL>>/<<page-summary>>), so nothing CER actually extracts is
+# lost, only the ReAct-style scratch-reasoning formatting convention the paper layers on top.
+CER_DYNAMICS_DISTILL_SI = """
+You will be given the state-action trajectory of a user interacting with a webpage and the overall goal of the trajectory.
+You need to summarize the useful pages and pair it up with the corresponding URLs.
+Output format:
+<<URL>>
+the URL of page 1
+<</URL>>
+<<page-summary>>
+the brief summary of page 1, following the format:
+Name: name page
+Description: descriptions
+Usages: usages
+<</page-summary>>
+<<URL>>
+the URL of page 2
+<</URL>>
+<<page-summary>>
+the brief summary of page 2, following the format:
+Name: name page
+Description: descriptions
+Usages: usages
+<</page-summary>>
+...
+# Examples
+## Example 1
+Overall goal of the trajectory: Go to r/books forum.
+Current website: Reddit
+Existing summarized pages:
+Page 1: Profile page
+Description: it shows the user's profile information.
+Usages: view or modify user's profile information.
+URL: https://www.example.com/profile
+Human user trajectory: [neglected here]
+## Output:
+<<URL>>
+https://www.example.com/forums
+<</URL>>
+<<page-summary>>
+Name: Forums page; Description: it shows a list of different forums.; Possible usages: navigate to different forums.
+<</page-summary>>
+IMPORTANT NOTES you should absolutely follow:
+1. DO NOT include any other words except url and page summary as the format stated above.
+2. Follow the example to think and summarize the page.
+3. You should only summarize once for each unique URL.
+4. Check existing pages before generating, do not summarize pages that have already been summarized, instead, use "Summarized before" in the steps.
+5. Focus on the main content of the page and may ignore the modifications made by the user when generating the summary.
+"""
+
+CER_SKILLS_DISTILL_SI = """
+You will be given the state-action trajectory of a user interacting with a webpage and the overall goal of the trajectory.
+You need to summarize skills from the trajectory.
+Skills are a subset of actions that the user takes to achieve a sub-goal.
+You should break the overall goal into sub-goals and summarize each sub-goal as a skill.
+Represent the non-fixed elements (input text, button strings) and non-fixed words (e.g. a specific forum name / user name; an option) with descriptive variable names as shown in the example.
+Output format:
+<<skill>>
+skill1 name here.
+<</skill>>
+<<steps>>
+The steps of the skill1 here.
+<</steps>>
+<<skill>>
+skill2 name here.
+<</skill>>
+<<steps>>
+The steps of the skill2 here.
+<</steps>>
+...
+# Examples
+## Example 1
+Overall goal: I want to get the cheapest product in the Cabinets, Racks & Shelves category
+Current website: current website
+Existing skills:
+Skill 1: Sort products by sort criterion
+1. To sort the products by sort criterion, I need to click on the "Sort by" dropdown menu.
+```click(sort by id)```
+2. To sort the products by sort criterion, I need to select the sort criterion option from the "Sort by" dropdown menu.
+```click(sort criterion id)```
+Human user trajectory: [neglected here for length]
+##Output: [neglected here for length]
+IMPORTANT NOTES you should absolutely follow:
+1. DO NOT include any other words except skills and steps as the format stated above.
+2. Check existing skills before generating; do not summarize skills that have already been summarized; instead, use "Summarized before" in the steps.
+3. You should break the overall goal into sub-goals and summarize each sub-goal as a skill.
+"""
+
+CER_DYNAMICS_RETRIEVE_SI = """
+You will be given a goal of a task to be executed on a website and a list of urls and the corresponding page summary to choose from.
+You need to select the pages that most possibly need to be visited to achieve the goal.
+You should break the task down into a few steps so that you can select the pages that can help most in each step.
+IMPORTANT: You should select not more than {max_n} pages!
+Output format:
+<<selected-pages>>
+id: the id number (the number at the beginning) of page 1; name: page 1 name
+id: the id number (the number at the beginning) of page 2; name: page 2 name
+...
+<</selected-pages>>
+# Examples
+## Example 1
+Task goal: Upvote the hottest post in r/books
+Current website: website descriptions
+Shortcuts to choose from:
+id: 1; name: Forums page; description: It shows a list of different forums; possible usages: navigate to different forums; url: https://www.example.com/forums
+id: 2; name: Profile page; description: It shows the information of current user; possible usages: Check or modify the information of the current user; url: https://www.example.com/profile
+id: 3; name: Submission page; description: It provides a few text boxes to fill in to submit a new post; possible usages: Submit new posts; url: https://www.example.com/submission
+id: 4: name: Subscribed forums page; description: It provides a list of subscribed forums; possible usages: check or navigate to subscribed forums; url: https://www.example.com/subscribed
+## Output 1:
+<<selected-pages>>
+id: 1; name: Forums page
+<</selected-pages>>
+"""
+
+CER_SKILLS_RETRIEVE_SI = """
+You will be given a goal of a task to be executed on a website and a list of skills to choose from.
+You need to select the skills that can help most in achieving the goal.
+You should break the task down into a few steps so that you can select the skills that can help most in each step.
+IMPORTANT: You should select not more than {max_n} skills!
+Output format:
+<<selected-skills>>
+id: the id number (the number at the beginning) of skill 1; name: skill 1 name
+id: the id number (the number at the beginning) of skill 2; name: skill 2 name
+...
+<</selected-skills>>
+# Examples
+## Example 1
+Task goal: Upvote the hottest post in r/books
+Current website: website descriptions
+Skills to choose from:
+Skill 1: Navigate to forums
+1. Click on the "Forums" menu item.
+```click(forums id)```
+2. Click on the specific forum name.
+```click(forum name id)```
+Skill 2: Submit a new post
+1. Type the post title in the title text box.
+```type(title text box id, "Post Title")```
+2. Type the post content in the content text box.
+```type(content text box id, "Post Content")```
+3. Click on the "Submit" button.
+```click(submit button id)```
+Skill 3: Sort posts by sort criterion
+1. Click on the "Sort by" dropdown menu.
+```click(sort by dropdown id)```
+2. Select the sort criterion option from the "Sort by" dropdown menu.
+```click(sort criterion id)```
+Output:
+<<selected-skills>>
+id: 1; name: Navigate to forums
+id: 3; name: Sort posts by hotness
+<</selected-skills>>
+Notes:
+1. Some skills might not be consistent with the current task but it is still useful to refer to, e.g. write a post to express happiness is useful in a task to write a post to express sadness.
+"""
+
+# Header prepended to the retrieved experiences when they are replayed into the agent's context
+# (paper 3.3: the selected experiences are mapped to natural language and concatenated into the
+# prompt). Deliberately parallel in shape to MEM_INSTRUCTION above so the arms differ in
+# *algorithm*, not in how much scaffolding text the agent sees.
+CER_REPLAY_INSTRUCTION = (
+    "Below are experiences replayed from past interactions with this environment that may be "
+    "helpful for the current task. The pages tell you what key pages contain and how to reach "
+    "them directly by URL; the skills give step-by-step patterns that worked before. Use them "
+    "when relevant, and ignore them when they do not apply."
+)
