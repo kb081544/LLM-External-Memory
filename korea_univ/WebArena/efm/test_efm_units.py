@@ -209,7 +209,7 @@ with tempfile.TemporaryDirectory() as td, \
 
 # ---------------------------------------------------------------- retrieve.py (pure sub-steps)
 print("retrieve.py (pure functions, no embeddings needed)")
-from efm.retrieve import collapse_groups, pair_conflicts, allocate_budget
+from efm.retrieve import collapse_groups, pair_conflicts, allocate_budget, select_candidate_experiences
 
 # group collapse: 2 of 3 share a group; the higher desc-cosine member should survive.
 collapsed = collapse_groups(
@@ -243,6 +243,21 @@ check("budget=1 with a single available: pair skipped, single used", injected ==
 injected = allocate_budget(pairs=[("a", "b", 0.9)], singles=[], n_inject=1,
                             score_map={"a": 0.9, "b": 0.3})
 check("budget=1 with no single: higher-scoring half of the pair only", injected == ["a"])
+
+
+# candidate experiences (EFM_TASK.md 3.6): an experience whose items are all deleted, or with no
+# stored experience yet, must not take one of the K_CAND slots.
+exps = {"ex_e1": {"item_ids": ["i1"]}, "ex_e2": {"item_ids": ["i2", "i3"]},
+        "ex_e3": {"item_ids": ["i4"]}, "ex_e5": {"item_ids": ["i5"]}}
+its = {"i1": {"deleted": True}, "i2": {"deleted": True}, "i3": {"deleted": False},
+       "i4": {"deleted": False}, "i5": {"deleted": False}}
+ranked = [("e1", 0.9), ("e4", 0.85), ("e2", 0.8), ("e3", 0.7), ("e5", 0.6)]
+picked = select_candidate_experiences(ranked, exps, its, k=2)
+check("all-deleted experience (e1) and unwritten experience (e4) are skipped",
+      [e for e, _ in picked] == ["e2", "e3"])
+check("partly-deleted experience (e2) still counts", ("e2", 0.8) in picked)
+check("fewer than k live experiences -> all of them",
+      [e for e, _ in select_candidate_experiences(ranked, exps, its, k=10)] == ["e2", "e3", "e5"])
 
 
 print(f"\n{passed} passed, {failed} failed")

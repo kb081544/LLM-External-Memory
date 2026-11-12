@@ -85,6 +85,23 @@ def allocate_budget(pairs, singles, n_inject: int, score_map: dict) -> list[str]
     return injected
 
 
+def select_candidate_experiences(ranked: list[tuple[str, float]], experiences: dict, items: dict,
+                                 k: int) -> list[tuple[str, float]]:
+    """Pure step 1: the top-k experiences, by query cosine, among those that still have at least
+    one non-deleted item. EFM_TASK.md 3.6: an experience whose item_ids are all deleted (or that
+    has no stored experience yet) is excluded from retrieval candidates, so it never takes one of
+    the k slots. `ranked` is [(task_id, cos)] sorted by cos descending; experiences are keyed
+    "ex_<task_id>"."""
+    out = []
+    for ex_id, cos in ranked:
+        exp = experiences.get(f"ex_{ex_id}")
+        if exp and any(iid in items and not items[iid]["deleted"] for iid in exp["item_ids"]):
+            out.append((ex_id, cos))
+            if len(out) == k:
+                break
+    return out
+
+
 def retrieve(query: str, now: int, task_id: str, items: dict, experiences: dict, hp,
              query_cache_path: str, desc_cache_path: str, n_inject: int):
     # 1. K_CAND candidate experiences via query-embedding cosine (append happens after scoring
@@ -97,7 +114,8 @@ def retrieve(query: str, now: int, task_id: str, items: dict, experiences: dict,
         return []
 
     cos_exp = store.cosine_to_cache(q_vec, cache_emb)
-    scored_exp = sorted(zip(ids, cos_exp.tolist()), key=lambda x: -x[1])[: hp.k_cand]
+    ranked_exp = sorted(zip(ids, cos_exp.tolist()), key=lambda x: -x[1])
+    scored_exp = select_candidate_experiences(ranked_exp, experiences, items, hp.k_cand)
     exp_cos = dict(scored_exp)
 
     # 2. expand candidate experiences' items, excluding deleted; item seen via multiple
